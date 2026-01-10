@@ -1,15 +1,16 @@
-import os, sys, datetime, xarray as xr
-import numpy as np
+import os, sys, datetime, json, xarray as xr
 from meteodatalab import ogd_api
 
 # --- Configuration ---
-LAT_TARGET, LON_TARGET = 46.81, 6.94
-CORE_VARS = ["T", "U", "V", "P"]
 CACHE_DIR = "cache_data"
+LOCATIONS_FILE = "locations.json"
 os.makedirs(CACHE_DIR, exist_ok=True)
 
+# Define horizons for 2h steps (e.g., 0h, 2h, 4h... up to 32h)
+HORIZONS = [f"P0DT{h}H" for h in range(0, 33, 2)] 
+CORE_VARS = ["T", "U", "V", "P"]
+
 def get_nearest_profile(ds, lat_target, lon_target):
-    """Your Original Vertical Profile Extraction Logic"""
     if ds is None: return None
     data = ds if isinstance(ds, xr.DataArray) else ds[list(ds.data_vars)[0]]
     lat_coord = 'latitude' if 'latitude' in data.coords else 'lat'
@@ -17,71 +18,55 @@ def get_nearest_profile(ds, lat_target, lon_target):
     horiz_dims = data.coords[lat_coord].dims
     dist = (data[lat_coord] - lat_target)**2 + (data[lon_coord] - lon_target)**2
     flat_idx = dist.argmin().values
-    if len(horiz_dims) == 1:
-        profile = data.isel({horiz_dims[0]: flat_idx})
-    else:
-        profile = data.stack(gp=horiz_dims).isel(gp=flat_idx)
+    profile = data.stack(gp=horiz_dims).isel(gp=flat_idx) if len(horiz_dims) > 1 else data.isel({horiz_dims[0]: flat_idx})
     return profile.squeeze().compute()
 
 def main():
-    force = os.getenv("FORCE_REFRESH") == "true"
+    with open(LOCATIONS_FILE, 'r') as f:
+        locations = json.load(f)
+
     now = datetime.datetime.now(datetime.timezone.utc)
     base_hour = (now.hour // 3) * 3
-    latest_run = now.replace(hour=base_hour, minute=0, second=0, microsecond=0)
-    times_to_try = [latest_run - datetime.timedelta(hours=i*3) for i in range(4)]
+    ref_time = now.replace(hour=base_hour, minute=0, second=0, microsecond=0)
+    
+    for name, coords in locations.items():
+        print(f"\n>>> Processing Location: {name}")
+        loc_data_list = []
+        
+        for horizon in HORIZONS:
+            try:
+                profile_vars = {}
+                for var in CORE_VARS:
+                    req = ogd_api.Request(collection="ogd-forecasting-icon-ch1", variable=var,
+                                         reference_datetime=ref_time, horizon=horizon)
+                    res = get_nearest_profile(ogd_api.get_from_ogd(req), coords['lat'], coords['lon'])
+                    profile_vars[var] = res
+                
+                # Fetch Humidity fallback
+                for hum_var in ["RELHUM", "QV"]:
+                    try:
+                        req_h = ogd_api.Request(collection="ogd-forecasting-icon-ch1", variable=hum_var,
+                                               reference_datetime=ref_time, horizon=horizon)
+                        res_h = get_nearest_profile(ogd_api.get_from_ogd(req_h), coords['lat'], coords['lon'])
+                        if res_h is not None:
+                            profile_vars["HUM"] = res_h
+                            break
+                    except: continue
 
-    for ref_time in times_to_try:
-        time_tag = ref_time.strftime('%Y%m%d_%H%M')
-        cache_path = os.path.join(CACHE_DIR, f"profile_{time_tag}.nc")
+                # Merge time step
+                ds_step = xr.Dataset(profile_vars)
+                ds_step = ds_step.expand_dims(time=[ref_time + datetime.timedelta(hours=int(horizon[4:-1]))])
+                loc_data_list.append(ds_step)
+                print(f"  Fetched horizon: {horizon}")
 
-        # Skip if already downloaded (unless forced)
-        if os.path.exists(cache_path) and not force:
-            print(f">>> Run {time_tag} found in cache. Skipping download.")
-            return
+            except Exception as e:
+                print(f"  Error fetching {horizon} for {name}: {e}")
 
-        print(f"--- Attempting Run: {ref_time.strftime('%H:%M')} UTC ---")
-        try:
-            profile_data = {}
-            for var in CORE_VARS:
-                req = ogd_api.Request(collection="ogd-forecasting-icon-ch1", variable=var,
-                                     reference_datetime=ref_time, horizon="P0DT0H", perturbed=False)
-                res = get_nearest_profile(ogd_api.get_from_ogd(req), LAT_TARGET, LON_TARGET)
-                if res is None or res.size < 5: raise ValueError(f"Empty {var}")
-                profile_data[var] = res
-            
-            # Fetch Humidity with fallback
-            for hum_var in ["RELHUM", "QV"]:
-                try:
-                    req_h = ogd_api.Request(collection="ogd-forecasting-icon-ch1", variable=hum_var,
-                                           reference_datetime=ref_time, horizon="P0DT0H", perturbed=False)
-                    res_h = get_nearest_profile(ogd_api.get_from_ogd(req_h), LAT_TARGET, LON_TARGET)
-                    if res_h is not None and res_h.size >= 5:
-                        profile_data["HUM"], profile_data["HUM_TYPE"] = res_h, hum_var
-                        break
-                except: continue
-            
-            if "HUM" not in profile_data: raise ValueError("No Humidity data found")
-
-            # --- PREPARE FOR SAVING ---
-            # Merge into a dataset
-            ds = xr.Dataset({v: profile_data[v] for v in CORE_VARS + ["HUM"]})
-            
-            # WIPE ALL METADATA (This is what caused the truth value errors)
-            # We want just the raw numbers and coordinates
-            ds.attrs = {"HUM_TYPE": profile_data["HUM_TYPE"], "ref_time": ref_time.isoformat()}
-            for v in ds.data_vars: ds[v].attrs = {}
-            for c in ds.coords: ds[c].attrs = {}
-
-            ds.to_netcdf(cache_path)
-            print(f">>> SUCCESS: Downloaded and cached {time_tag}")
-            return 
-
-        except Exception as e:
-            print(f"Run {ref_time.strftime('%H:%M')} incomplete: {e}")
-            continue
-
-    print("Error: Could not retrieve any complete model runs.")
-    sys.exit(1)
+        if loc_data_list:
+            final_ds = xr.concat(loc_data_list, dim="time")
+            cache_path = os.path.join(CACHE_DIR, f"{name}_latest.nc")
+            final_ds.to_netcdf(cache_path)
+            print(f"  Saved: {cache_path}")
 
 if __name__ == "__main__":
     main()
