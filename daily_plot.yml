@@ -1,0 +1,66 @@
+name: Sounding Workflow
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_refresh:
+        description: 'Download fresh data?'
+        type: boolean
+        default: false
+      plot_only:
+        description: 'Skip fetch step?'
+        type: boolean
+        default: false
+  schedule:
+    - cron: '0 6 * * *'
+
+jobs:
+  run-plot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      # 1. Weather Data Cache
+      - name: Cache Weather Data
+        uses: actions/cache@v4
+        with:
+          path: cache_data
+          key: weather-v1-${{ github.run_id }}
+          restore-keys: weather-v1-
+
+      # 2. Setup uv with cache enabled
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-path: "requirements.txt"
+
+      # 3. Lean System Dependencies
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get install -y libeccodes-dev || (sudo apt-get update && sudo apt-get install -y libeccodes-dev)
+
+      # 4. Create venv and Sync dependencies
+      - name: Install Python Dependencies
+        run: |
+          uv venv
+          uv pip install -r requirements.txt
+
+      # 5. Fetch Step (Only if not plot_only)
+      - name: Fetch Data
+        if: github.event.inputs.plot_only != 'true'
+        env:
+          FORCE_REFRESH: ${{ github.event.inputs.force_refresh }}
+        run: uv run python fetch_data.py
+
+      # 6. Plot Step
+      - name: Generate Plot
+        run: uv run python plot_skewt.py
+
+      # 7. Upload Resulting Plot
+      - name: Upload Plot
+        uses: actions/upload-artifact@v4
+        with:
+          name: skewt-plot
+          path: "*.png"
