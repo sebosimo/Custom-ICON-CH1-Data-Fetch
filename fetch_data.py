@@ -3,7 +3,6 @@ import numpy as np
 from meteodatalab import ogd_api
 
 # --- Configuration ---
-# Use QV (Specific Humidity) for perfect vertical alignment with T, P, U, V
 CORE_VARS = ["T", "U", "V", "P", "QV"]
 CACHE_DIR = "cache_data"
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -21,16 +20,14 @@ def get_location_indices(ds, locations):
     grid_lon = ds[lon_name].values
     for name, coords in locations.items():
         dist = (grid_lat - coords['lat'])**2 + (grid_lon - coords['lon'])**2
+        # Returns a tuple: (idx,) for 1D or (y, x) for 2D
         idx = np.unravel_index(np.argmin(dist), dist.shape)
         indices[name] = idx
     return indices
 
 def main():
-    if not os.path.exists("locations.json"):
-        print("Error: locations.json not found.")
-        return
-    with open("locations.json", "r") as f:
-        locations = json.load(f)
+    if not os.path.exists("locations.json"): return
+    with open("locations.json", "r") as f: locations = json.load(f)
 
     now = datetime.datetime.now(datetime.timezone.utc)
     base_hour = (now.hour // 3) * 3
@@ -40,7 +37,6 @@ def main():
     horizons = range(0, max_h + 1, 2)
     time_tag = ref_time.strftime('%Y%m%d_%H%M')
 
-    # --- SECTION 2: INITIALIZE REPORTING ---
     report = {name: {"success": 0, "total": len(horizons)} for name in locations}
     print(f"--- ICON-CH1 Run: {time_tag} | Max Horizon: {max_h}h ---")
 
@@ -75,23 +71,27 @@ def main():
 
                 loc_data = {}
                 for var_name, ds_field in domain_fields.items():
-                    # --- SECTION 1: ROBUST VARIABLE/DIMENSION FIX ---
-                    # Detect spatial dimension regardless of name
-                    spatial_dim = None
-                    for d in ['ncells', 'cell', 'values', 'index', 'node']:
-                        if d in ds_field.dims:
-                            spatial_dim = d
-                            break
+                    try:
+                        # --- BULLETPROOF EXTRACTION LOGIC ---
+                        # Instead of guessing dimension names, we look at the shape of the index
+                        if len(idx) == 1:
+                            # The index is 1D (e.g., (402,)), so the grid is 1D
+                            # Find the only dimension that matches the size of the coordinate array
+                            spatial_dim = ds_field.lat.dims[0] if 'lat' in ds_field.coords else ds_field.latitude.dims[0]
+                            subset = ds_field.isel({spatial_dim: idx[0]})
+                        else:
+                            # The index is 2D (e.g., (10, 25)), so the grid is 2D
+                            subset = ds_field.isel(y=idx[0], x=idx[1])
+                        
+                        res = subset.squeeze().compute()
+                        loc_data[var_name] = res.drop_vars([c for c in res.coords if c not in res.dims])
                     
-                    if spatial_dim:
-                        subset = ds_field.isel({spatial_dim: idx[0]})
-                    else:
-                        # Fallback for structured 2D grids
-                        subset = ds_field.isel(y=idx[0], x=idx[1])
-                    
-                    # Force alignment by removing confusing metadata coords
-                    res = subset.squeeze().compute()
-                    loc_data[var_name] = res.drop_vars([c for c in res.coords if c not in res.dims])
+                    except Exception as extraction_err:
+                        # DIAGNOSTIC LOGGING
+                        print(f"CRITICAL ERROR during extraction for {var_name} at {name}")
+                        print(f"Data Dimensions: {list(ds_field.dims)}")
+                        print(f"Calculated Index: {idx}")
+                        raise extraction_err
 
                 ds_final = xr.Dataset(loc_data)
                 ds_final.attrs = {
@@ -107,15 +107,13 @@ def main():
         except Exception as e:
             print(f"  [ERROR] Horizon +{h_int}h failed: {e}")
 
-    # --- SECTION 2: PRINT FINAL REPORT ---
+    # --- REPORTING ---
     print("\n" + "="*50)
     print(f" DATA FETCH REPORT: {time_tag}")
     print("="*50)
-    print(f"{'Location':<15} | {'Steps Ready':<12} | {'Status'}")
-    print("-" * 50)
     for name, stats in report.items():
         status = "✅ COMPLETE" if stats["success"] == stats["total"] else f"⚠️ MISSING {stats['total']-stats['success']}"
-        print(f"{name:<15} | {stats['success']:>2}/{stats['total']:<2}         | {status}")
+        print(f"{name:<15} | {stats['success']:>2}/{stats['total']:<2} | {status}")
     print("="*50 + "\n")
 
 if __name__ == "__main__":
