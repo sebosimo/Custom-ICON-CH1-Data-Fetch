@@ -1,5 +1,6 @@
 import os, sys, datetime, json, xarray as xr
 import numpy as np
+import traceback # Added for sound data
 from meteodatalab import ogd_api
 
 # --- Configuration ---
@@ -12,30 +13,6 @@ def get_iso_horizon(total_hours):
     hours = total_hours % 24
     return f"P{days}DT{hours}H"
 
-def get_location_indices(ds, locations):
-    print(f"DEBUG: Entering get_location_indices", flush=True)
-    lat_name = 'latitude' if 'latitude' in ds.coords else 'lat'
-    lon_name = 'longitude' if 'longitude' in ds.coords else 'lon'
-    
-    print(f"DEBUG: Grid coordinates identified as: {lat_name}, {lon_name}", flush=True)
-    
-    indices = {}
-    grid_lat = ds[lat_name].values
-    grid_lon = ds[lon_name].values
-    
-    print(f"DEBUG: Coordinate array shape: {grid_lat.shape}", flush=True)
-    
-    for name, coords in locations.items():
-        dist = (grid_lat - coords['lat'])**2 + (grid_lon - coords['lon'])**2
-        flat_min_idx = np.argmin(dist)
-        # unravel_index turns a flat index into a coordinate tuple (e.g. (402,) or (10, 20))
-        idx = np.unravel_index(flat_min_idx, grid_lat.shape)
-        indices[name] = idx
-    
-    sample_key = list(indices.keys())[0]
-    print(f"DEBUG: Sample calculated index for {sample_key}: {indices[sample_key]}", flush=True)
-    return indices
-
 def main():
     if not os.path.exists("locations.json"):
         print("ERROR: locations.json missing", flush=True)
@@ -43,80 +20,58 @@ def main():
     with open("locations.json", "r") as f:
         locations = json.load(f)
 
+    # Calculate latest run
     now = datetime.datetime.now(datetime.timezone.utc)
     base_hour = (now.hour // 3) * 3
     ref_time = now.replace(hour=base_hour, minute=0, second=0, microsecond=0)
     
-    max_h = 45 if ref_time.hour == 3 else 33
-    horizons = range(0, max_h + 1, 2)
+    # Check if the run is too fresh (less than 90 mins old)
+    # ICON-CH1 usually takes ~1.5 hours to start appearing on OGD
+    time_since_run = (now - ref_time).total_seconds() / 60
+    print(f"--- RUN INFO ---", flush=True)
+    print(f"Target Run: {ref_time.strftime('%Y-%m-%d %H:%M')} UTC", flush=True)
+    print(f"Time since run start: {time_since_run:.1f} minutes", flush=True)
+
+    horizons = range(0, 33, 2)
     time_tag = ref_time.strftime('%Y%m%d_%H%M')
-
-    print(f"--- STARTING RUN: {time_tag} ---", flush=True)
-
-    cached_indices = None
 
     for h_int in horizons:
         iso_h = get_iso_horizon(h_int)
-        print(f"\n>>> PROCESSING STEP: +{h_int}h", flush=True)
+        print(f"\n>>> ATTEMPTING STEP: +{h_int}h ({iso_h})", flush=True)
         
-        domain_fields = {}
         try:
-            for var in CORE_VARS:
-                print(f"DEBUG: Fetching {var} from API...", flush=True)
-                req = ogd_api.Request(collection="ogd-forecasting-icon-ch1", variable=var,
-                                     reference_datetime=ref_time, horizon=iso_h, perturbed=False)
-                res = ogd_api.get_from_ogd(req)
-                if res is None:
-                    print(f"DEBUG: Variable {var} returned None", flush=True)
-                    continue
-                domain_fields[var] = res
-
-            if not domain_fields:
-                print(f"DEBUG: No variables fetched for this step, skipping.", flush=True)
+            # 1. FETCH - This is where the crash happens
+            print(f"DEBUG: Calling ogd_api.get_from_ogd for variable 'T'...", flush=True)
+            req = ogd_api.Request(collection="ogd-forecasting-icon-ch1", 
+                                 variable="T",
+                                 reference_datetime=ref_time, 
+                                 horizon=iso_h, 
+                                 perturbed=False)
+            
+            # This call downloads and indexes the GRIB
+            ds_t = ogd_api.get_from_ogd(req)
+            
+            if ds_t is None:
+                print(f"RESULT: API returned None (Data not ready yet).", flush=True)
                 continue
-
-            if cached_indices is None:
-                cached_indices = get_location_indices(domain_fields[list(domain_fields.keys())[0]], locations)
-
-            for name in locations.keys():
-                idx = cached_indices[name]
-                print(f"DEBUG: Extracting location '{name}' with index {idx}", flush=True)
                 
-                loc_data = {}
-                for var_name, ds_field in domain_fields.items():
-                    print(f"  DEBUG: Processing {var_name}. Dims: {list(ds_field.dims)}", flush=True)
-                    
-                    # Logic Check
-                    spatial_dim = None
-                    for d in ['ncells', 'cell', 'values', 'index']:
-                        if d in ds_field.dims:
-                            spatial_dim = d
-                            break
-                    
-                    print(f"  DEBUG: Spatial dim identified as: {spatial_dim}", flush=True)
+            print(f"RESULT: Successfully fetched T. Dims: {list(ds_t.dims)}", flush=True)
+            
+            # If T works, we would proceed to others...
+            # For this diagnostic, we stop here if successful to save time
+            print(f"DEBUG: Data for this step is healthy. Moving to next check.", flush=True)
 
-                    # THIS IS THE SUSPECTED CRASH POINT
-                    if spatial_dim:
-                        print(f"  DEBUG: Attempting 1D selection on {spatial_dim} using idx[0]={idx[0]}", flush=True)
-                        subset = ds_field.isel({spatial_dim: idx[0]})
-                    else:
-                        print(f"  DEBUG: No 1D dim found. Attempting 2D selection (y,x) using idx[0]={idx[0]}, idx[1]={idx[1]}", flush=True)
-                        subset = ds_field.isel(y=idx[0], x=idx[1])
-                    
-                    loc_data[var_name] = subset.squeeze().compute()
-
-                # Saving logic
-                ds_final = xr.Dataset(loc_data)
-                ds_final.attrs = {"location": name, "ref_time": ref_time.isoformat(), "horizon_h": h_int}
-                out_path = os.path.join(CACHE_DIR, f"{name}_{time_tag}_H{h_int:02d}.nc")
-                ds_final.to_netcdf(out_path)
-                print(f"  SUCCESS: Saved {name}", flush=True)
-
-        except Exception as e:
-            print(f"\n!!! CRITICAL FAILURE AT +{h_int}h !!!", flush=True)
-            print(f"Error Type: {type(e).__name__}", flush=True)
-            print(f"Error Message: {e}", flush=True)
-            # In a diagnostic run, we want to stop and see the log
+        except Exception:
+            print(f"\n!!! CAPTURED CRITICAL TRACEBACK !!!", flush=True)
+            # THIS IS THE SOUND DATA: It prints the exact line in the library that failed
+            traceback.print_exc(file=sys.stdout)
+            print(f"!!! END OF TRACEBACK !!!\n", flush=True)
+            
+            # If the error is an IndexError, it's almost certainly a "Not Ready" issue on the server
+            if isinstance(sys.exc_info()[1], IndexError):
+                print("INTERPRETATION: The GRIB file likely exists but is empty or has a broken header (Incomplete Upload).", flush=True)
+            
+            # Stop the script so we don't spam the log
             sys.exit(1)
 
 if __name__ == "__main__":
