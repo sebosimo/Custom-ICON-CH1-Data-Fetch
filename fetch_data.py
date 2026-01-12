@@ -13,9 +13,10 @@ def get_iso_horizon(total_hours):
     return f"P{days}DT{hours}H"
 
 def is_run_complete_locally(time_tag, locations, max_h):
-    """Checks if the last file of a run exists locally."""
+    """Checks if the very last file of a run exists in the new folder structure."""
     last_loc = list(locations.keys())[-1]
-    check_file = os.path.join(CACHE_DIR, f"{last_loc}_{time_tag}_H{max_h:02d}.nc")
+    # New Path: cache_data / Run / Location / Hxx.nc
+    check_file = os.path.join(CACHE_DIR, time_tag, last_loc, f"H{max_h:02d}.nc")
     return os.path.exists(check_file)
 
 def main():
@@ -26,9 +27,7 @@ def main():
     base_hour = (now.hour // 3) * 3
     latest_run = now.replace(hour=base_hour, minute=0, second=0, microsecond=0)
     
-    # Target A (Latest) and Target B (Previous)
     targets = [latest_run, latest_run - datetime.timedelta(hours=3)]
-    
     selected_run = None
     
     print("--- CHECKING FOR AVAILABLE RUNS ---")
@@ -36,30 +35,25 @@ def main():
         tag = run.strftime('%Y%m%d_%H%M')
         max_h = 45 if run.hour == 3 else 33
         
-        # 1. Do we already have this run?
         if is_run_complete_locally(tag, locations, max_h):
-            print(f"Run {tag}: ✅ Already fully cached.")
-            # If we already have the latest target, we stop entirely
+            print(f"Run {tag}: ✅ Already fully cached in folders.")
             if run == targets[0]:
                 print("Everything is up to date.")
                 return
-            continue # If we have the old run but not the new one, keep checking the new one
+            continue
             
-        # 2. If we don't have it, is it ready on the server?
         try:
             req = ogd_api.Request(collection="ogd-forecasting-icon-ch1", variable="T",
                                  reference_datetime=run, horizon="P0DT0H", perturbed=False)
             if ogd_api.get_from_ogd(req) is not None:
                 print(f"Run {tag}: ✨ NEW DATA READY! Selecting this run.")
                 selected_run = run
-                break # We found the newest possible run that is ready to download
-            else:
-                print(f"Run {tag}: ❌ Files not found on server yet.")
+                break
         except (IndexError, Exception):
-            print(f"Run {tag}: ❌ Server says 'not ready' (IndexError).")
+            print(f"Run {tag}: ❌ Server says 'not ready'.")
 
     if not selected_run:
-        print("RESULT: No new runs to download at this time.")
+        print("RESULT: No new runs to download.")
         return
 
     # --- START DOWNLOAD FOR SELECTED RUN ---
@@ -67,6 +61,10 @@ def main():
     time_tag = ref_time.strftime('%Y%m%d_%H%M')
     max_h = 45 if ref_time.hour == 3 else 33
     horizons = range(0, max_h + 1, 2)
+    
+    # Initialize Reporting Tracker
+    # Status can be: "Cached", "Downloaded", "Pending"
+    report_data = {name: {h: "Pending" for h in horizons} for name in locations}
     
     print(f"\n--- PROCESSING RUN: {time_tag} ---")
     cached_indices = None
@@ -90,8 +88,14 @@ def main():
                 cached_indices = {n: int(np.argmin((lats-c['lat'])**2+(lons-c['lon'])**2)) for n, c in locations.items()}
 
             for name, flat_idx in cached_indices.items():
-                cache_path = os.path.join(CACHE_DIR, f"{name}_{time_tag}_H{h_int:02d}.nc")
-                if os.path.exists(cache_path): continue
+                # Folder structure: cache_data / RUN / LOCATION / Hxx.nc
+                loc_dir = os.path.join(CACHE_DIR, time_tag, name)
+                os.makedirs(loc_dir, exist_ok=True)
+                cache_path = os.path.join(loc_dir, f"H{h_int:02d}.nc")
+
+                if os.path.exists(cache_path): 
+                    report_data[name][h_int] = "Cached"
+                    continue
 
                 loc_vars = {}
                 for var_name, ds_full in domain_fields.items():
@@ -106,12 +110,30 @@ def main():
                 
                 for v in ds_final.data_vars: ds_final[v].attrs = {}
                 ds_final.to_netcdf(cache_path)
+                report_data[name][h_int] = "New"
             
             print(f"  [OK] Horizon +{h_int}h")
 
-        except Exception as e:
-            print(f"  [WAIT] Horizon +{h_int}h not ready yet. Stopping here to resume later.")
+        except Exception:
+            print(f"  [WAIT] Horizon +{h_int}h not ready yet. Stopping.")
             break 
+
+    # --- FINAL REPORTING BLOCK ---
+    print("\n" + "="*60)
+    print(f" DATA FETCH REPORT | RUN: {time_tag}")
+    print("="*60)
+    print(f"{'Location':<15} | {'Progress':<12} | {'Action Summary'}")
+    print("-" * 60)
+    for name, steps in report_data.items():
+        done = sum(1 for s in steps.values() if s in ["Cached", "New"])
+        total = len(horizons)
+        new = sum(1 for s in steps.values() if s == "New")
+        cached = sum(1 for s in steps.values() if s == "Cached")
+        
+        status_icon = "✅" if done == total else "⏳"
+        action_str = f"{new} New, {cached} Cached"
+        print(f"{name:<15} | {status_icon} {done:2}/{total:2} steps | {action_str}")
+    print("="*60 + "\n")
 
 if __name__ == "__main__":
     main()
