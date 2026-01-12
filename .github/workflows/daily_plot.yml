@@ -50,7 +50,7 @@ jobs:
           
           mkdir -p cache_data
           # Auto-clean data older than 2 days
-          find cache_data -name "*.nc" -mtime +2 -delete || true
+          find cache_data -type f -name "*.nc" -mtime +2 -delete || true
           
           git add cache_data/
           
