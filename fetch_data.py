@@ -109,6 +109,12 @@ def main():
                     lat_coord = 'latitude' if 'latitude' in ds_full.coords else 'lat'
                     spatial_dim = ds_full[lat_coord].dims[0]
                     profile = ds_full.squeeze().isel({spatial_dim: flat_idx}).compute()
+                    
+                    # --- PHYSICAL ALIGNMENT FIX ---
+                    # Normalize the vertical dimension name to ensure perfect variable merging
+                    v_dim = profile.dims[0]
+                    profile = profile.rename({v_dim: 'level'})
+                    # Drop non-dimension coordinates to prevent sparse data alignment issues
                     loc_vars[var_name] = profile.drop_vars([c for c in profile.coords if c not in profile.dims])
 
                 ds_final = xr.Dataset(loc_vars)
