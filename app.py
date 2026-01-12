@@ -109,11 +109,17 @@ def render_custom_emagram(file_path):
     ax1.plot(skew_td, z_p, color='blue', linewidth=2, zorder=4, alpha=0.7)
 
     # 6. Wind Panel (Right Side)
-    ax2.plot(w_p, z_p, color='blue', linewidth=1.5, alpha=0.3)
+    # UPDATED: Made line stronger (linewidth 2.5, alpha 0.6)
+    ax2.plot(w_p, z_p, color='blue', linewidth=1, alpha=0.6)
     ax2.set_xlim(0, 80)
     ax2.set_xticks([0, 20, 40, 60])
-    ax2.set_xlabel("Wind (km/h)", fontsize=10)
+    
+    # UPDATED: Matched fontsize to 12
+    ax2.set_xlabel("Wind (km/h)", fontsize=12)
     ax2.grid(True, alpha=0.15)
+    
+    # UPDATED: Remove ticks on the left side of the wind plot
+    ax2.tick_params(axis='y', left=False, labelleft=False)
     
     # Draw Wind Barbs
     step = max(1, len(z_p) // 12)
