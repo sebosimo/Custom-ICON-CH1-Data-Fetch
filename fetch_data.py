@@ -13,9 +13,8 @@ def get_iso_horizon(total_hours):
     return f"P{days}DT{hours}H"
 
 def is_run_complete_locally(time_tag, locations, max_h):
-    """Checks if the very last file of a run exists in the new folder structure."""
+    """Checks if the very last file of a run exists."""
     last_loc = list(locations.keys())[-1]
-    # New Path: cache_data / Run / Location / Hxx.nc
     check_file = os.path.join(CACHE_DIR, time_tag, last_loc, f"H{max_h:02d}.nc")
     return os.path.exists(check_file)
 
@@ -36,7 +35,7 @@ def main():
         max_h = 45 if run.hour == 3 else 33
         
         if is_run_complete_locally(tag, locations, max_h):
-            print(f"Run {tag}: ✅ Already fully cached in folders.")
+            print(f"Run {tag}: ✅ Already fully cached.")
             if run == targets[0]:
                 print("Everything is up to date.")
                 return
@@ -46,7 +45,7 @@ def main():
             req = ogd_api.Request(collection="ogd-forecasting-icon-ch1", variable="T",
                                  reference_datetime=run, horizon="P0DT0H", perturbed=False)
             if ogd_api.get_from_ogd(req) is not None:
-                print(f"Run {tag}: ✨ NEW DATA READY! Selecting this run.")
+                print(f"Run {tag}: ✨ NEW DATA READY!")
                 selected_run = run
                 break
         except (IndexError, Exception):
@@ -62,16 +61,28 @@ def main():
     max_h = 45 if ref_time.hour == 3 else 33
     horizons = range(0, max_h + 1, 2)
     
-    # Initialize Reporting Tracker
-    # Status can be: "Cached", "Downloaded", "Pending"
     report_data = {name: {h: "Pending" for h in horizons} for name in locations}
-    
     print(f"\n--- PROCESSING RUN: {time_tag} ---")
     cached_indices = None
 
     for h_int in horizons:
+        # --- NEW GATEKEEPER CHECK ---
+        # Check if EVERY location already has this horizon saved
+        needed_locations = []
+        for name in locations.keys():
+            path = os.path.join(CACHE_DIR, time_tag, name, f"H{h_int:02d}.nc")
+            if not os.path.exists(path):
+                needed_locations.append(name)
+            else:
+                report_data[name][h_int] = "Cached"
+        
+        if not needed_locations:
+            # Skip the API call entirely for this hour
+            continue
+
+        # If we reach here, at least one location needs data. Download the GRIBs.
         iso_h = get_iso_horizon(h_int)
-        valid_time = ref_time + datetime.timedelta(hours=h_int)
+        print(f"  Fetching Domain for +{h_int:02d}h...", end=" ", flush=True)
         
         try:
             domain_fields = {}
@@ -87,15 +98,11 @@ def main():
                 lats, lons = sample[lat_n].values, sample[lon_n].values
                 cached_indices = {n: int(np.argmin((lats-c['lat'])**2+(lons-c['lon'])**2)) for n, c in locations.items()}
 
-            for name, flat_idx in cached_indices.items():
-                # Folder structure: cache_data / RUN / LOCATION / Hxx.nc
+            for name in needed_locations:
+                flat_idx = cached_indices[name]
                 loc_dir = os.path.join(CACHE_DIR, time_tag, name)
                 os.makedirs(loc_dir, exist_ok=True)
                 cache_path = os.path.join(loc_dir, f"H{h_int:02d}.nc")
-
-                if os.path.exists(cache_path): 
-                    report_data[name][h_int] = "Cached"
-                    continue
 
                 loc_vars = {}
                 for var_name, ds_full in domain_fields.items():
@@ -106,19 +113,19 @@ def main():
 
                 ds_final = xr.Dataset(loc_vars)
                 ds_final.attrs = {"location": name, "HUM_TYPE": "QV", "ref_time": ref_time.isoformat(), 
-                                 "horizon_h": h_int, "valid_time": valid_time.isoformat()}
+                                 "horizon_h": h_int, "valid_time": (ref_time + datetime.timedelta(hours=h_int)).isoformat()}
                 
                 for v in ds_final.data_vars: ds_final[v].attrs = {}
                 ds_final.to_netcdf(cache_path)
                 report_data[name][h_int] = "New"
             
-            print(f"  [OK] Horizon +{h_int}h")
+            print("Done.")
 
         except Exception:
-            print(f"  [WAIT] Horizon +{h_int}h not ready yet. Stopping.")
+            print("Not ready yet.")
             break 
 
-    # --- FINAL REPORTING BLOCK ---
+    # --- FINAL REPORTING ---
     print("\n" + "="*60)
     print(f" DATA FETCH REPORT | RUN: {time_tag}")
     print("="*60)
@@ -129,10 +136,8 @@ def main():
         total = len(horizons)
         new = sum(1 for s in steps.values() if s == "New")
         cached = sum(1 for s in steps.values() if s == "Cached")
-        
         status_icon = "✅" if done == total else "⏳"
-        action_str = f"{new} New, {cached} Cached"
-        print(f"{name:<15} | {status_icon} {done:2}/{total:2} steps | {action_str}")
+        print(f"{name:<15} | {status_icon} {done:2}/{total:2} steps | {new} New, {cached} Cached")
     print("="*60 + "\n")
 
 if __name__ == "__main__":
