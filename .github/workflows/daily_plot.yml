@@ -9,7 +9,7 @@ on:
         default: false
   schedule:
     # Runs every 30 minutes, 24/7.
-    - cron: '*/30 * * * *'
+    - cron: '17,47 * * * *'
 
 jobs:
   update-weather-data:
