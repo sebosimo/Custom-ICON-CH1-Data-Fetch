@@ -12,6 +12,16 @@ import datetime
 # This makes the app use the full width of your screen
 st.set_page_config(page_title="XCBenz Therm", layout="wide")
 
+# --- CSS TO REDUCE TOP WHITESPACE ---
+st.markdown("""
+    <style>
+    .block-container {
+        padding-top: 1rem;
+        padding-bottom: 0rem;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
 CACHE_DIR = "cache_data"
 def get_available_runs():
     """Returns a list of run folders, newest first."""
@@ -109,16 +119,17 @@ def render_custom_emagram(file_path):
     ax1.plot(skew_td, z_p, color='blue', linewidth=2, zorder=4, alpha=0.7)
 
     # 6. Wind Panel (Right Side)
-    # UPDATED: Made line stronger (linewidth 2.5, alpha 0.6)
+    # Made line stronger (linewidth 2.5, alpha 0.6)
     ax2.plot(w_p, z_p, color='blue', linewidth=1, alpha=0.6)
     ax2.set_xlim(0, 80)
     ax2.set_xticks([0, 20, 40, 60])
     
-    # UPDATED: Matched fontsize to 12
-    ax2.set_xlabel("Wind (km/h)", fontsize=12)
+    # UPDATED: Added "Wind" back to the label
+    ax2.set_xlabel("Wind (km/h)", fontsize=14)
+    ax2.tick_params(axis='x', labelsize=13) 
     ax2.grid(True, alpha=0.15)
     
-    # UPDATED: Remove ticks on the left side of the wind plot
+    # Remove ticks on the left side of the wind plot
     ax2.tick_params(axis='y', left=False, labelleft=False)
     
     # Draw Wind Barbs
@@ -127,8 +138,12 @@ def render_custom_emagram(file_path):
               u_p[::step], v_p[::step], length=5, color='black', alpha=0.7)
 
     # Axis Labels
-    ax1.set_ylabel("Altitude (km)", fontsize=12)
-    ax1.set_xlabel("Temperature (°C)", fontsize=12)
+    # UPDATED: "km" moved closer to spine (-0.01) and up (-0.06), right aligned
+    ax1.set_ylabel("") 
+    ax1.text(0.02, -0.05, "km", transform=ax1.transAxes, fontsize=14, ha='right', va='top')
+    
+    ax1.set_xlabel("Temperature (°C)", fontsize=14)
+    ax1.tick_params(axis='both', labelsize=13)
     ax1.grid(True, axis='y', alpha=0.2)
     
     return fig
@@ -171,13 +186,13 @@ else:
         valid_dt = datetime.datetime.fromisoformat(ds.attrs["valid_time"])
         swiss_dt = valid_dt + datetime.timedelta(hours=1) # Winter time correction
 
-        st.subheader(f"{selected_loc} at {swiss_dt.strftime('%A %H:%M')} (Local Time)")
+        st.subheader(f"{selected_loc} at {swiss_dt.strftime('%A %H:%M')} (LT)")
         
         # --- THE PLOT ---
         with st.spinner("Generating Emagram..."):
             fig = render_custom_emagram(file_to_plot)
             st.pyplot(fig, use_container_width=True)
             
-        st.caption(f"Model Run: {selected_run} UTC | Forecast Step: {selected_hor} | Altitude: km")
+        st.caption(f"Model Run: {selected_run} UTC | Meteoswiss ICON-CH1")
     else:
         st.warning("No time steps found for this location.")
