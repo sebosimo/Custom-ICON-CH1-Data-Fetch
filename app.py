@@ -12,10 +12,10 @@ import datetime
 # This makes the app use the full width of your screen
 st.set_page_config(page_title="XCBenz Therm", layout="wide")
 
-# --- CSS: TITLE FIX & TOUCH BAR ---
+# --- CSS: SAFE MARGIN TUNING & TOUCH BAR ---
 st.markdown("""
     <style>
-    /* 1. Reverted Header Spacing (Title is visible again) */
+    /* 1. Global Container: Safe reduction of top white space */
     .block-container {
         padding-top: 1rem !important;
         padding-bottom: 2rem !important;
@@ -24,17 +24,22 @@ st.markdown("""
     /* 2. Touch Bar Styling (Big Navigation Buttons) */
     div.stButton > button {
         width: 100% !important;
-        height: 50px !important; /* Tall touch target */
+        height: 50px !important;
         font-size: 1.2rem !important;
         font-weight: bold !important;
         border-radius: 8px !important;
         margin-top: 0px !important;
     }
     
-    /* Force columns to stay side-by-side on mobile */
+    /* 3. Force columns to stay side-by-side on mobile */
     div[data-testid="column"] {
         min-width: 0px !important;
         flex: 1 1 auto !important;
+    }
+    
+    /* 4. Remove extra bottom margin from the main title to pull dropdowns up slightly */
+    h1 {
+        margin-bottom: 0rem !important;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -218,7 +223,7 @@ else:
         valid_dt = datetime.datetime.fromisoformat(ds.attrs["valid_time"])
         swiss_dt = valid_dt + datetime.timedelta(hours=1) # Winter time correction
 
-        st.subheader(f"{selected_loc} at {swiss_dt.strftime('%A %H:%M')} (LT)")
+        st.subheader(f"{selected_loc} {swiss_dt.strftime('%A %H:%M')} (LT)")
         
         # --- THE PLOT ---
         with st.spinner("Generating Emagram..."):
@@ -242,7 +247,7 @@ else:
             label_visibility="collapsed",
             on_change=slider_callback
         )
-            
-        st.caption(f"Model Run: {selected_run} UTC | Meteoswiss ICON-CH1")
+        
+        # Bottom caption removed
     else:
         st.warning("No time steps found for this location.")
