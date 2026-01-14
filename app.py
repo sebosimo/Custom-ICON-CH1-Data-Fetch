@@ -193,6 +193,10 @@ else:
 
     # 3. Time Logic with Session State
     available_horizons = inventory.get(selected_loc, [])
+    
+    # --- FILTER ADDED: Keep only even hours (H00, H02...) ---
+    if available_horizons:
+        available_horizons = [h for h in available_horizons if int(h.replace("H", "")) % 2 == 0]
         
     if available_horizons:
         # Initialize State for Navigation
@@ -243,8 +247,7 @@ else:
         st.select_slider(
             "Forecast Hour", 
             options=available_horizons, 
-            value=available_horizons[st.session_state.forecast_index],
-            key="slider_key",
+            key="slider_key", # The key handles the value automatically now
             label_visibility="collapsed",
             on_change=slider_callback
         )
