@@ -12,12 +12,29 @@ import datetime
 # This makes the app use the full width of your screen
 st.set_page_config(page_title="XCBenz Therm", layout="wide")
 
-# --- CSS TO REDUCE TOP WHITESPACE ---
+# --- CSS: TITLE FIX & TOUCH BAR ---
 st.markdown("""
     <style>
+    /* 1. Reverted Header Spacing (Title is visible again) */
     .block-container {
-        padding-top: 1rem;
-        padding-bottom: 0rem;
+        padding-top: 1rem !important;
+        padding-bottom: 2rem !important;
+    }
+    
+    /* 2. Touch Bar Styling (Big Navigation Buttons) */
+    div.stButton > button {
+        width: 100% !important;
+        height: 50px !important; /* Tall touch target */
+        font-size: 1.2rem !important;
+        font-weight: bold !important;
+        border-radius: 8px !important;
+        margin-top: 0px !important;
+    }
+    
+    /* Force columns to stay side-by-side on mobile */
+    div[data-testid="column"] {
+        min-width: 0px !important;
+        flex: 1 1 auto !important;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -140,7 +157,7 @@ def render_custom_emagram(file_path):
     # Axis Labels
     # UPDATED: "km" moved closer to spine (-0.01) and up (-0.06), right aligned
     ax1.set_ylabel("") 
-    ax1.text(0.02, -0.05, "km", transform=ax1.transAxes, fontsize=14, ha='right', va='top')
+    ax1.text(-0.01, -0.06, "km", transform=ax1.transAxes, fontsize=13, ha='right', va='top')
     
     ax1.set_xlabel("Temperature (°C)", fontsize=14)
     ax1.tick_params(axis='both', labelsize=13)
@@ -169,16 +186,31 @@ else:
         selected_loc = st.selectbox("Select Flying Site", location_list, 
                                     index=location_list.index("Sion") if "Sion" in location_list else 0)
 
-    # 3. Time Slider
-    # Get the specific hours available for the chosen site
+    # 3. Time Logic with Session State
     available_horizons = inventory.get(selected_loc, [])
         
     if available_horizons:
-        # Site and Horizon selection
-        selected_hor = st.select_slider("Select Forecast Hour", 
-                                        options=available_horizons, 
-                                        value=available_horizons[0])
+        # Initialize State for Navigation
+        if 'forecast_index' not in st.session_state:
+            st.session_state.forecast_index = 0
         
+        # Clamp index
+        st.session_state.forecast_index = min(st.session_state.forecast_index, len(available_horizons) - 1)
+
+        # Navigation Callbacks
+        def prev_step():
+            st.session_state.forecast_index = max(0, st.session_state.forecast_index - 1)
+            st.session_state.slider_key = available_horizons[st.session_state.forecast_index]
+
+        def next_step():
+            st.session_state.forecast_index = min(len(available_horizons) - 1, st.session_state.forecast_index + 1)
+            st.session_state.slider_key = available_horizons[st.session_state.forecast_index]
+
+        def slider_callback():
+            st.session_state.forecast_index = available_horizons.index(st.session_state.slider_key)
+
+        # Determine current selection
+        selected_hor = available_horizons[st.session_state.forecast_index]
         file_to_plot = os.path.join(CACHE_DIR, selected_run, selected_loc, f"{selected_hor}.nc")
         
         # Accurate Valid Time Header
@@ -192,6 +224,24 @@ else:
         with st.spinner("Generating Emagram..."):
             fig = render_custom_emagram(file_to_plot)
             st.pyplot(fig, use_container_width=True)
+        
+        # --- NEW: TOUCH BAR NAVIGATION (Hidden-style Buttons) ---
+        # 50/50 Split under the plot
+        nav1, nav2 = st.columns([1, 1], gap="small")
+        with nav1:
+            st.button("◂ Previous", on_click=prev_step, use_container_width=True)
+        with nav2:
+            st.button("Next ▸", on_click=next_step, use_container_width=True)
+
+        # Slider (Bottom)
+        st.select_slider(
+            "Forecast Hour", 
+            options=available_horizons, 
+            value=available_horizons[st.session_state.forecast_index],
+            key="slider_key",
+            label_visibility="collapsed",
+            on_change=slider_callback
+        )
             
         st.caption(f"Model Run: {selected_run} UTC | Meteoswiss ICON-CH1")
     else:
