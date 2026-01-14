@@ -1,6 +1,7 @@
 import streamlit as st
 import xarray as xr
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 from matplotlib.collections import LineCollection
 from matplotlib.colors import Normalize
 import metpy.calc as mpcalc
@@ -12,46 +13,53 @@ import datetime
 # This makes the app use the full width of your screen
 st.set_page_config(page_title="XCBenz Therm", layout="wide")
 
-# --- CSS: SAFE MARGIN TUNING & TOUCH BAR ---
+# --- CSS: MARGIN TUNING & TOUCH BAR ---
 st.markdown("""
     <style>
-    /* 1. Global Container: Safe reduction of top white space */
+    /* 1. Global Container: Increased top padding so Title is visible */
     .block-container {
-        padding-top: 1rem !important;
+        padding-top: 2.5rem !important; /* CHANGED from 0.5rem to 2.5rem */
         padding-bottom: 2rem !important;
     }
     
-    /* 2. Touch Bar Styling (Big Navigation Buttons) */
+    /* 2. Title (H1): Reduce padding */
+    h1 {
+        padding-top: 0rem !important;
+        margin-bottom: 0.5rem !important;
+    }
+
+    /* 3. Subheader (H3): Pull it closer */
+    h3 {
+        padding-top: 0rem !important;
+        margin-top: -10px !important;
+        margin-bottom: 0px !important;
+    }
+
+    /* 4. Touch Bar Buttons (Big & easy to tap) */
     div.stButton > button {
         width: 100% !important;
         height: 50px !important;
         font-size: 1.2rem !important;
         font-weight: bold !important;
         border-radius: 8px !important;
-        margin-top: 0px !important;
+        margin-top: 5px !important;
     }
     
-    /* 3. Force columns to stay side-by-side on mobile */
+    /* 5. Force columns to stay side-by-side on mobile */
     div[data-testid="column"] {
         min-width: 0px !important;
         flex: 1 1 auto !important;
-    }
-    
-    /* 4. Remove extra bottom margin from the main title to pull dropdowns up slightly */
-    h1 {
-        margin-bottom: 0rem !important;
     }
     </style>
 """, unsafe_allow_html=True)
 
 CACHE_DIR = "cache_data"
+
 def get_available_runs():
     """Returns a list of run folders, newest first."""
     if not os.path.exists(CACHE_DIR):
         return []
-    # Get all folder names in cache_data
     runs = [d for d in os.listdir(CACHE_DIR) if os.path.isdir(os.path.join(CACHE_DIR, d))]
-    # Sort them alphabetically (which works for YYYYMMDD_HHMM format) and reverse for newest first
     return sorted(runs, reverse=True)
 
 def get_data_inventory(run_folder):
@@ -62,34 +70,93 @@ def get_data_inventory(run_folder):
     if not os.path.exists(run_path):
         return {}
 
-    # 1. Find all location subfolders
     locations = [d for d in os.listdir(run_path) if os.path.isdir(os.path.join(run_path, d))]
-    
     for loc in sorted(locations):
         loc_path = os.path.join(run_path, loc)
-        # 2. Find all .nc files for that location
         steps = [f.replace(".nc", "") for f in os.listdir(loc_path) if f.endswith(".nc")]
         inventory[loc] = sorted(steps)
-        
     return inventory
+
+@st.cache_data
+def render_time_height_plot(run_folder, location):
+    """Generates a Time-Height cross-section of Lapse Rate."""
+    loc_path = os.path.join(CACHE_DIR, run_folder, location)
+    if not os.path.exists(loc_path): return None
+    
+    files = sorted([os.path.join(loc_path, f) for f in os.listdir(loc_path) if f.endswith(".nc")])
+    if not files: return None
+
+    times = []
+    heights_list = []
+    temps_list = []
+    
+    for f in files:
+        try:
+            ds = xr.open_dataset(f)
+            p = ds["P"].values * units.Pa
+            t = (ds["T"].values * units.K).to(units.degC)
+            z = mpcalc.pressure_to_height_std(p).to(units.km).m
+            vt = datetime.datetime.fromisoformat(ds.attrs["valid_time"])
+            
+            times.append(vt)
+            heights_list.append(z)
+            temps_list.append(t.m)
+        except:
+            continue
+
+    if not times: return None
+
+    reg_z = np.arange(0, 7.05, 0.05) 
+    reg_t = np.zeros((len(reg_z), len(times)))
+    
+    for i in range(len(times)):
+        z_col = heights_list[i]
+        t_col = temps_list[i]
+        sort_idx = np.argsort(z_col)
+        reg_t[:, i] = np.interp(reg_z, z_col[sort_idx], t_col[sort_idx])
+
+    dt_dz = -np.gradient(reg_t, axis=0) / 0.05 
+    lapse_rate = dt_dz / 10.0 
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    time_nums = mdates.date2num(times)
+    X, Y = np.meshgrid(time_nums, reg_z)
+    
+    levels = np.linspace(-1, 1.2, 23) 
+    cmap = plt.get_cmap("RdYlGn") 
+    
+    c = ax.contourf(X, Y, lapse_rate, levels=levels, cmap=cmap, extend='both')
+    
+    ax.xaxis_date()
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+    ax.set_ylim(0, 7)
+    ax.set_ylabel("Altitude (km)")
+    
+    ax.set_title(f"Stability Overview: {location}", fontsize=14, fontweight='bold', pad=15)
+    
+    cbar = plt.colorbar(c, ax=ax, label="Lapse Rate (°C / 100m)")
+    cbar.set_ticks([-1, 0, 0.5, 1.0])
+    cbar.set_ticklabels(['Inversion', 'Isothermal', 'Standard', 'Dry Adiabatic'])
+    
+    ax.grid(True, alpha=0.3, linestyle='--')
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.9) 
+    return fig
+
 @st.cache_data
 def render_custom_emagram(file_path):
     """The core plotting engine with custom skew and lapse-rate coloring."""
     ds = xr.open_dataset(file_path)
     
-    # 1. Physical Extraction
-    # We use 'level' as the dimension because of our fetch_data fix
     p = ds["P"].values * units.Pa
     t = (ds["T"].values * units.K).to(units.degC)
     qv = ds["QV"].values * units('kg/kg')
     u_ms, v_ms = ds["U"].values * units('m/s'), ds["V"].values * units('m/s')
     
-    # Calculate Dewpoint and Altitude
     td = mpcalc.dewpoint_from_specific_humidity(p, t, qv)
     z = mpcalc.pressure_to_height_std(p).to(units.km)
     wind_speed_kmh = mpcalc.wind_speed(u_ms, v_ms).to('km/h').m
 
-    # Sort by height and mask to 7km (Aviation relevant area)
     inds = z.argsort()
     z_p, t_p, td_p = z[inds].m, t[inds].m, td[inds].m
     u_p, v_p, w_p = u_ms[inds].to('km/h').m, v_ms[inds].to('km/h').m, wind_speed_kmh[inds]
@@ -97,93 +164,66 @@ def render_custom_emagram(file_path):
     mask = z_p <= 7.0
     z_p, t_p, td_p, u_p, v_p, w_p = z_p[mask], t_p[mask], td_p[mask], u_p[mask], v_p[mask], w_p[mask]
 
-    # 2. Skew Configuration (SKEW_FACTOR 5 means 0.5°C/100m is a vertical line)
+    # Skew Logic
     SKEW_FACTOR = 5 
     def skew_x(temp, height): return temp + (height * SKEW_FACTOR)
 
     skew_t = skew_x(t_p, z_p)
     skew_td = skew_x(td_p, z_p)
 
-    # 3. Figure Setup (Wide layout for mobile)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 8), sharey=True, 
                                    gridspec_kw={'width_ratios': [4, 1], 'wspace': 0})
     
     ax1.set_ylim(0, 7.0)
-    # Dynamic Zoom: Center the X-axis on the data
     min_x, max_x = min(np.min(skew_t), np.min(skew_td)), max(np.max(skew_t), np.max(skew_td))
     ax1.set_xlim(min_x - 5, max_x + 5)
 
-    # 4. Draw Background Helper Lines
-    # Isotherms (Blue, tilted ~45°)
     for temp_base in range(-60, 60, 5):
         ax1.plot([skew_x(temp_base, 0), skew_x(temp_base, 7)], [0, 7], color='blue', alpha=0.04, zorder=1)
-
-    # Dry Adiabats (Brown, 1.0°C/100m)
     for theta_base in range(-60, 100, 5):
-        # Math: T decreases 10° per km. Skew correction adds 5° per km.
-        # Result: Dry adiabat leans left at 5° per km.
         ax1.plot([skew_x(theta_base, 0), skew_x(theta_base-70, 7)], [0, 7], color='brown', alpha=0.06, zorder=1)
 
-    # 5. Plot Temperature with Lapse-Rate Coloring (Heatmap)
     dt, dz = np.diff(t_p), np.diff(z_p)
-    lapse_rate = -(dt / dz) # Positive = cooling with height
-    
+    lapse_rate = -(dt / dz)
     points = np.array([skew_t, z_p]).T.reshape(-1, 1, 2)
     segments = np.concatenate([points[:-1], points[1:]], axis=1)
-    
-    # RdYlGn: Red (Lapse Rate < 4: Stable/Inversion), Green (Lapse Rate > 8: Unstable)
     norm = Normalize(vmin=3, vmax=9) 
     lc = LineCollection(segments, cmap='RdYlGn', norm=norm, linewidth=5, zorder=5)
     lc.set_array(lapse_rate)
     ax1.add_collection(lc)
-
-    # Plot Dewpoint (Blue)
     ax1.plot(skew_td, z_p, color='blue', linewidth=2, zorder=4, alpha=0.7)
 
-    # 6. Wind Panel (Right Side)
-    # Made line stronger (linewidth 2.5, alpha 0.6)
     ax2.plot(w_p, z_p, color='blue', linewidth=1, alpha=0.6)
     ax2.set_xlim(0, 80)
     ax2.set_xticks([0, 20, 40, 60])
-    
-    # UPDATED: Added "Wind" back to the label
     ax2.set_xlabel("Wind (km/h)", fontsize=14)
     ax2.tick_params(axis='x', labelsize=13) 
     ax2.grid(True, alpha=0.15)
-    
-    # Remove ticks on the left side of the wind plot
     ax2.tick_params(axis='y', left=False, labelleft=False)
     
-    # Draw Wind Barbs
     step = max(1, len(z_p) // 12)
     ax2.barbs(np.ones_like(z_p[::step]) * 70, z_p[::step], 
               u_p[::step], v_p[::step], length=5, color='black', alpha=0.7)
 
-    # Axis Labels
-    # UPDATED: "km" moved closer to spine (-0.01) and up (-0.06), right aligned
     ax1.set_ylabel("") 
     ax1.text(-0.01, -0.06, "km", transform=ax1.transAxes, fontsize=13, ha='right', va='top')
-    
     ax1.set_xlabel("Temperature (°C)", fontsize=14)
     ax1.tick_params(axis='both', labelsize=13)
     ax1.grid(True, axis='y', alpha=0.2)
-    
     return fig
+
+# --- APP UI ---
 st.title("XCBenz Therm")
 
-# 1. Scan for runs
 runs = get_available_runs()
 
 if not runs:
     st.error("No data found. Please run fetch_data.py or pull data from GitHub.")
 else:
-    # 2. Site and Run Selection (Top Row)
     col1, col2 = st.columns([3, 1])
-    
     with col2:
         selected_run = st.selectbox("Model Run (UTC)", runs, index=0)
     
-    # Get inventory for the chosen run
     inventory = get_data_inventory(selected_run)
     location_list = list(inventory.keys())
 
@@ -191,67 +231,72 @@ else:
         selected_loc = st.selectbox("Select Flying Site", location_list, 
                                     index=location_list.index("Sion") if "Sion" in location_list else 0)
 
-    # 3. Time Logic with Session State
     available_horizons = inventory.get(selected_loc, [])
     
-    # --- FILTER ADDED: Keep only even hours (H00, H02...) ---
-    if available_horizons:
-        available_horizons = [h for h in available_horizons if int(h.replace("H", "")) % 2 == 0]
+    # Filter 2-hour steps for UI slider (Emagram only)
+    slider_horizons = [h for h in available_horizons if int(h.replace("H", "")) % 2 == 0]
         
-    if available_horizons:
-        # Initialize State for Navigation
+    if slider_horizons:
         if 'forecast_index' not in st.session_state:
             st.session_state.forecast_index = 0
         
-        # Clamp index
-        st.session_state.forecast_index = min(st.session_state.forecast_index, len(available_horizons) - 1)
+        st.session_state.forecast_index = min(st.session_state.forecast_index, len(slider_horizons) - 1)
 
-        # Navigation Callbacks
+        current_slider_value = slider_horizons[st.session_state.forecast_index]
+        if 'slider_key' not in st.session_state or st.session_state.slider_key != current_slider_value:
+            st.session_state.slider_key = current_slider_value
+
         def prev_step():
             st.session_state.forecast_index = max(0, st.session_state.forecast_index - 1)
-            st.session_state.slider_key = available_horizons[st.session_state.forecast_index]
+            st.session_state.slider_key = slider_horizons[st.session_state.forecast_index]
 
         def next_step():
-            st.session_state.forecast_index = min(len(available_horizons) - 1, st.session_state.forecast_index + 1)
-            st.session_state.slider_key = available_horizons[st.session_state.forecast_index]
+            st.session_state.forecast_index = min(len(slider_horizons) - 1, st.session_state.forecast_index + 1)
+            st.session_state.slider_key = slider_horizons[st.session_state.forecast_index]
 
         def slider_callback():
-            st.session_state.forecast_index = available_horizons.index(st.session_state.slider_key)
+            st.session_state.forecast_index = slider_horizons.index(st.session_state.slider_key)
 
-        # Determine current selection
-        selected_hor = available_horizons[st.session_state.forecast_index]
+        selected_hor = slider_horizons[st.session_state.forecast_index]
         file_to_plot = os.path.join(CACHE_DIR, selected_run, selected_loc, f"{selected_hor}.nc")
         
-        # Accurate Valid Time Header
+        # Header Info
         ds = xr.open_dataset(file_to_plot)
         valid_dt = datetime.datetime.fromisoformat(ds.attrs["valid_time"])
-        swiss_dt = valid_dt + datetime.timedelta(hours=1) # Winter time correction
+        swiss_dt = valid_dt + datetime.timedelta(hours=1) 
 
-        # You can change '20px' to whatever size you want
-        st.markdown(f"<h3 style='font-size: 20px; margin: 0;'>{selected_loc} {swiss_dt.strftime('%A %H:%M')} (LT)</h3>", unsafe_allow_html=True)
+        st.subheader(f"{selected_loc} {swiss_dt.strftime('%A %H:%M')} (LT)")
         
-        # --- THE PLOT ---
-        with st.spinner("Generating Emagram..."):
-            fig = render_custom_emagram(file_to_plot)
-            st.pyplot(fig, use_container_width=True)
+        # --- TABS LOGIC ---
+        tab1, tab2 = st.tabs(["📈 Sounding (Detail)", "📅 Time-Height (Overview)"])
         
-        # --- NEW: TOUCH BAR NAVIGATION (Hidden-style Buttons) ---
-        # 50/50 Split under the plot
-        nav1, nav2 = st.columns([1, 1], gap="small")
-        with nav1:
-            st.button("◂ Previous", on_click=prev_step, use_container_width=True)
-        with nav2:
-            st.button("Next ▸", on_click=next_step, use_container_width=True)
+        with tab1:
+            with st.spinner("Generating Emagram..."):
+                fig = render_custom_emagram(file_to_plot)
+                st.pyplot(fig, use_container_width=True)
+            
+            nav1, nav2 = st.columns([1, 1], gap="small")
+            with nav1:
+                st.button("◂ Previous", on_click=prev_step, use_container_width=True)
+            with nav2:
+                st.button("Next ▸", on_click=next_step, use_container_width=True)
 
-        # Slider (Bottom)
-        st.select_slider(
-            "Forecast Hour", 
-            options=available_horizons, 
-            key="slider_key", # The key handles the value automatically now
-            label_visibility="collapsed",
-            on_change=slider_callback
-        )
-        
-        # Bottom caption removed
+            st.select_slider(
+                "Forecast Hour", 
+                options=slider_horizons, 
+                key="slider_key",
+                label_visibility="collapsed",
+                on_change=slider_callback
+            )
+
+        with tab2:
+            st.caption("Vertical Lapse Rate Evolution (°C/100m). Green = Unstable (Thermals), Red = Stable (Inversion).")
+            with st.spinner("Calculating full day evolution..."):
+                fig_time = render_time_height_plot(selected_run, selected_loc)
+                if fig_time:
+                    st.pyplot(fig_time, use_container_width=True)
+                else:
+                    st.error("Could not generate overview. Ensure data is available.")
+            
     else:
         st.warning("No time steps found for this location.")
