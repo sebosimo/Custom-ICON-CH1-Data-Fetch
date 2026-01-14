@@ -64,18 +64,24 @@ jobs:
           git config --global user.name "GitHub Action"
           git config --global user.email "actions@github.com"
           
-          # Ensure cache_data exists
+          # 1. Ensure directory exists
           mkdir -p cache_data
           
-          # FIX 2: Cleanup logic for the new subfolder structure
+          # 2. Cleanup Files: Delete .nc files older than 2 days
+          # '|| true' prevents the script from crashing if no files are found
           find cache_data -type f -name "*.nc" -mtime +2 -delete || true
           
+          # 3. Cleanup Folders: Remove empty run folders (New addition)
+          # This keeps the folder tree clean as old runs expire
+          find cache_data -type d -empty -delete || true
+          
+          # 4. Stage changes
           git add cache_data/
           
-          # FIX 3: Pull latest changes from other runs before pushing
-          # This resolves the "rejected main -> main" error
+          # 5. Commit and Push with Race Condition Protection
           if [ -n "$(git status --porcelain)" ]; then
             git commit -m "Auto-update weather data: $(date -u +'%Y-%m-%d %H:%M') UTC"
+            # CRITICAL: Pull latest changes before pushing to avoid conflicts
             git pull --rebase origin main
             git push
           else
