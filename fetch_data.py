@@ -59,7 +59,7 @@ def main():
     ref_time = selected_run
     time_tag = ref_time.strftime('%Y%m%d_%H%M')
     max_h = 45 if ref_time.hour == 3 else 33
-    horizons = range(0, max_h + 1, 2)
+    horizons = range(0, max_h + 1, 1)
     
     report_data = {name: {h: "Pending" for h in horizons} for name in locations}
     print(f"\n--- PROCESSING RUN: {time_tag} ---")
