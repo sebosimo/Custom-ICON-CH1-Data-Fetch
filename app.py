@@ -116,31 +116,31 @@ def render_time_height_plot(run_folder, location):
         reg_t[:, i] = np.interp(reg_z, z_col[sort_idx], t_col[sort_idx])
 
     dt_dz = -np.gradient(reg_t, axis=0) / 0.05 
-    lapse_rate = dt_dz / 10.0 
+    lapse_rate = dt_dz
 
     fig, ax = plt.subplots(figsize=(12, 6))
     time_nums = mdates.date2num(times)
     X, Y = np.meshgrid(time_nums, reg_z)
     
-    levels = np.linspace(-1, 1.2, 23) 
+    levels = np.linspace(3, 9, 100)
     cmap = plt.get_cmap("RdYlGn") 
     
     c = ax.contourf(X, Y, lapse_rate, levels=levels, cmap=cmap, extend='both')
     
     ax.xaxis_date()
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%a %H:%M'))
     ax.set_ylim(0, 7)
-    ax.set_ylabel("Altitude (km)")
+    ax.set_ylabel("Altitude (km)", fontsize=14)
+    ax.tick_params(axis='both', labelsize=13)
     
-    ax.set_title(f"Stability Overview: {location}", fontsize=14, fontweight='bold', pad=15)
-    
-    cbar = plt.colorbar(c, ax=ax, label="Lapse Rate (°C / 100m)")
-    cbar.set_ticks([-1, 0, 0.5, 1.0])
-    cbar.set_ticklabels(['Inversion', 'Isothermal', 'Standard', 'Dry Adiabatic'])
+    cbar = plt.colorbar(c, ax=ax)
+    cbar.set_ticks([3, 6, 9])
+    cbar.set_ticklabels(['Stable/Inv (<3°C)', '6°C', 'Good (>9°C)'])
+    cbar.ax.tick_params(labelsize=13)
     
     ax.grid(True, alpha=0.3, linestyle='--')
     plt.tight_layout()
-    plt.subplots_adjust(top=0.9) 
+    plt.subplots_adjust(top=0.98)
     return fig
 
 @st.cache_data
@@ -290,7 +290,6 @@ else:
             )
 
         with tab2:
-            st.caption("Vertical Lapse Rate Evolution (°C/100m). Green = Unstable (Thermals), Red = Stable (Inversion).")
             with st.spinner("Calculating full day evolution..."):
                 fig_time = render_time_height_plot(selected_run, selected_loc)
                 if fig_time:
