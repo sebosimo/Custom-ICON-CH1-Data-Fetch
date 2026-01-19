@@ -184,6 +184,8 @@ def main():
 
     if not selected_run:
         print("RESULT: No new runs to download.")
+        # Attempt cleanup even if no new run, to keep things tidy
+        cleanup_old_runs()
         return
 
     ref_time = selected_run
@@ -240,6 +242,51 @@ def main():
             print("Done")
         else:
             print("Failed (No data)")
+
+    # Cleanup after processing
+    cleanup_old_runs()
+
+def cleanup_old_runs():
+    """
+    Removes runs older than RETENTION_DAYS (env var).
+    If RETENTION_DAYS is not set, NO cleanup is performed (local default).
+    """
+    days_str = os.environ.get("RETENTION_DAYS")
+    if not days_str:
+        return # Keep everything locally
+
+    try:
+        days_to_keep = int(days_str)
+    except ValueError:
+        print(f"Warning: Invalid RETENTION_DAYS '{days_str}', skipping cleanup.")
+        return
+
+    print(f"--- CLEANING UP OLD DATA (Retention: {days_to_keep} days) ---")
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days_to_keep)
+    
+    # We look at folder names YYYYMMDD_HHMM
+    dirs_to_check = [CACHE_DIR_TRACES, CACHE_DIR_MAPS]
+    
+    for d in dirs_to_check:
+        if not os.path.exists(d): continue
+        
+        for item in os.listdir(d):
+            path = os.path.join(d, item)
+            if not os.path.isdir(path): continue
+            
+            # Parse timestamp from folder name
+            try:
+                # Expected format: 20260119_1800
+                dt = datetime.datetime.strptime(item, "%Y%m%d_%H%M")
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+                
+                if dt < cutoff:
+                    print(f"Deleting old run: {path}")
+                    import shutil
+                    shutil.rmtree(path)
+            except ValueError:
+                # Not a timestamped folder, skip
+                pass
 
 if __name__ == "__main__":
     main()

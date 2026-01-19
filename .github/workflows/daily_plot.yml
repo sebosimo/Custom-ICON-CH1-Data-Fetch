@@ -57,6 +57,7 @@ jobs:
       - name: Fetch Weather Data
         env:
           FORCE_REFRESH: ${{ github.event.inputs.force_refresh }}
+          RETENTION_DAYS: "2" # Explicitly clean up data older than 2 days in CI
         run: uv run python fetch_data.py
 
       - name: Commit and Push Data
@@ -64,21 +65,18 @@ jobs:
           git config --global user.name "GitHub Action"
           git config --global user.email "actions@github.com"
           
-          # 1. Ensure directory exists
+          # 1. Ensure directories exist (fetch_data.py should create them, but for safety)
           mkdir -p cache_data
+          mkdir -p cache_wind
           
-          # 2. Cleanup Files: Delete .nc files older than 2 days
-          # '|| true' prevents the script from crashing if no files are found
-          find cache_data -type f -name "*.nc" -mtime +2 -delete || true
+          # 2. Cleanup (Now handled by fetch_data.py based on RETENTION_DAYS)
+          # We no longer use 'find -mtime' because git checkout resets file timestamps.
           
-          # 3. Cleanup Folders: Remove empty run folders (New addition)
-          # This keeps the folder tree clean as old runs expire
-          find cache_data -type d -empty -delete || true
-          
-          # 4. Stage changes
+          # 3. Stage changes (Include BOTH folders)
           git add cache_data/
+          git add cache_wind/
           
-          # 5. Commit and Push with Race Condition Protection
+          # 4. Commit and Push with Race Condition Protection
           if [ -n "$(git status --porcelain)" ]; then
             git commit -m "Auto-update weather data: $(date -u +'%Y-%m-%d %H:%M') UTC"
             # CRITICAL: Pull latest changes before pushing to avoid conflicts
