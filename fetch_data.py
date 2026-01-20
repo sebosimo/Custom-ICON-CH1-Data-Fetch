@@ -214,6 +214,8 @@ def main():
 
     print(f"\n--- PROCESSING RUN: {time_tag} ---")
     
+    vars_all = list(set(VARS_TRACES + VARS_MAPS))
+    
     # We remove HHL from the loop, as we have it (or not)
     vars_to_fetch = [v for v in vars_all if v != "HHL"]
     
