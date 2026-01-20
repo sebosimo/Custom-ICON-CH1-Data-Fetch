@@ -36,8 +36,9 @@ def get_iso_horizon(total_hours):
 def is_run_complete_locally(time_tag, locations, max_h):
     """Checks if the very last file of a run exists."""
     last_loc = list(locations.keys())[-1]
-    check_file = os.path.join(CACHE_DIR_TRACES, time_tag, last_loc, f"H{max_h:02d}.nc")
-    return os.path.exists(check_file)
+    check_trace = os.path.join(CACHE_DIR_TRACES, time_tag, last_loc, f"H{max_h:02d}.nc")
+    check_map = os.path.join(CACHE_DIR_MAPS, time_tag, f"wind_maps_H{max_h:02d}.nc")
+    return os.path.exists(check_trace) and os.path.exists(check_map)
 
 def process_traces(domain_fields, locations, time_tag, h_int, ref_time):
     """Extracts point data for specific locations."""
@@ -193,9 +194,28 @@ def main():
     max_h = 45 if ref_time.hour == 3 else 33
     horizons = range(0, max_h + 1, 1)
     
+    # --- 1. Fetch HHL Once (Topology) ---
+    print("Fetching HHL (Topology)...", end=" ", flush=True)
+    hhl_field = None
+    try:
+        # HHL is time-invariant essentially, or at least 'Analysis' (Horizon 0) is sufficient.
+        req_hhl = ogd_api.Request(collection="ogd-forecasting-icon-ch1", variable="HHL",
+                             reference_datetime=ref_time, horizon="P0DT0H", perturbed=False)
+        hhl_field = ogd_api.get_from_ogd(req_hhl)
+        if hhl_field is not None:
+             print("Done")
+        else:
+             print("Failed (None)")
+    except Exception as e:
+        print(f"Failed ({e})")
+
+    if hhl_field is None:
+        print("Warning: Could not download HHL. Wind maps will NOT be generated.")
+
     print(f"\n--- PROCESSING RUN: {time_tag} ---")
     
-    vars_all = list(set(VARS_TRACES + VARS_MAPS))
+    # We remove HHL from the loop, as we have it (or not)
+    vars_to_fetch = [v for v in vars_all if v != "HHL"]
     
     for h_int in horizons:
         # Check if needed
@@ -215,29 +235,36 @@ def main():
         iso_h = get_iso_horizon(h_int)
         
         domain_fields = {}
-        for var in vars_all:
+        
+        # Inject HHL if available
+        if hhl_field is not None:
+            domain_fields["HHL"] = hhl_field
+
+        for var in vars_to_fetch:
             # Print separate progress dot potentially or handle failure
             try:
-                # Special handling for HHL? No, try standard request.
                 req = ogd_api.Request(collection="ogd-forecasting-icon-ch1", variable=var,
                                      reference_datetime=ref_time, horizon=iso_h, perturbed=False)
                 res = ogd_api.get_from_ogd(req)
                 if res is not None:
                     domain_fields[var] = res
             except Exception as e:
-                # If HHL fails, we log it but don't crash main loop
                 # print(f"({var} err)", end="")
                 pass
         
         if domain_fields:
+            # Check if we have enough for Traces
+            # Traces need VARS_TRACES. HHL is NOT in VARS_TRACES usually (only for maps)
+            # VARS_TRACES = ["T", "U", "V", "P", "QV"]
+            
             if traces_needed:
-                 # Check if Trace Vars present
                  if any(v in domain_fields for v in VARS_TRACES):
                      process_traces(domain_fields, locations, time_tag, h_int, ref_time)
             
             if maps_needed:
                  # Check HHL/Wind
-                 process_wind_maps(domain_fields, time_tag, h_int, ref_time)
+                 if hhl_field is not None and "U" in domain_fields and "V" in domain_fields:
+                     process_wind_maps(domain_fields, time_tag, h_int, ref_time)
             
             print("Done")
         else:
@@ -251,11 +278,13 @@ def cleanup_old_runs():
     Removes runs older than RETENTION_DAYS (env var).
     If RETENTION_DAYS is not set, NO cleanup is performed (local default).
     """
-    days_str = os.environ.get("RETENTION_DAYS")
-    if not days_str:
-        return # Keep everything locally
-
     try:
+        days_str = os.environ.get("RETENTION_DAYS")
+        if not days_str:
+            # If not running in CI (or no env var), we might want a default or just return.
+            # For now, let's look for a local default or return to avoid deleting user data unexpectedly.
+            return 
+        
         days_to_keep = int(days_str)
     except ValueError:
         print(f"Warning: Invalid RETENTION_DAYS '{days_str}', skipping cleanup.")
@@ -272,21 +301,33 @@ def cleanup_old_runs():
         
         for item in os.listdir(d):
             path = os.path.join(d, item)
-            if not os.path.isdir(path): continue
             
-            # Parse timestamp from folder name
-            try:
-                # Expected format: 20260119_1800
-                dt = datetime.datetime.strptime(item, "%Y%m%d_%H%M")
-                dt = dt.replace(tzinfo=datetime.timezone.utc)
-                
-                if dt < cutoff:
-                    print(f"Deleting old run: {path}")
-                    import shutil
-                    shutil.rmtree(path)
-            except ValueError:
-                # Not a timestamped folder, skip
-                pass
+            # 1. Handle Directories (Runs)
+            if os.path.isdir(path):
+                # Parse timestamp from folder name
+                try:
+                    # Expected format: YYYYMMDD_HHMM
+                    dt = datetime.datetime.strptime(item, "%Y%m%d_%H%M")
+                    dt = dt.replace(tzinfo=datetime.timezone.utc)
+                    
+                    if dt < cutoff:
+                        print(f"Deleting old run: {path}")
+                        import shutil
+                        shutil.rmtree(path)
+                except ValueError:
+                    # Not a timestamped folder, skip
+                    pass
+            
+            # 2. Handle Orphaned Files (e.g. invalid downloads, old logs)
+            elif os.path.isfile(path):
+                 # Check modification time
+                 mtime = datetime.datetime.fromtimestamp(os.path.getmtime(path), tz=datetime.timezone.utc)
+                 if mtime < cutoff:
+                     print(f"Deleting old orphaned file: {path}")
+                     try:
+                        os.remove(path)
+                     except Exception as e:
+                        print(f"Failed to remove {path}: {e}")
 
 if __name__ == "__main__":
     main()
