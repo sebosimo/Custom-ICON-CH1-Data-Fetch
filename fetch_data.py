@@ -138,9 +138,14 @@ def load_static_grid():
         ds = xr.open_dataset(path, engine='cfgrib', backend_kwargs={'indexpath': ''})
         grid = {}
         for key in ['lat', 'lon']:
-            grid[key] = next((ds[k].load() for k in ds.coords if key in k.lower()), None)
+            # Search both coordinates and data variables
+            match_k = next((k for k in list(ds.coords) + list(ds.data_vars) if key in k.lower()), None)
+            if match_k:
+                grid[key] = ds[match_k].load()
+            else:
+                grid[key] = None
         ds.close()
-        return grid if grid['lat'] is not None else None
+        return grid if grid.get('lat') is not None else None
     except Exception as e: log(f"Error loading HGRID: {e}", "ERROR"); return None
 
 def is_run_complete_locally(time_tag, locations, max_h):
@@ -178,6 +183,7 @@ def process_wind_maps(fields, tag, h_int, ref):
     output_path = os.path.join(CACHE_DIR_MAPS, tag, f"wind_maps_H{h_int:02d}.nc")
     if os.path.exists(output_path) or "U" not in fields or "V" not in fields or "HHL" not in fields: return
 
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     from metpy.interpolate import interpolate_to_isosurface
     u, v, hhl = fields["U"].squeeze(), fields["V"].squeeze(), fields["HHL"].squeeze()
     
@@ -219,6 +225,16 @@ def main():
     hhl = load_static_hhl()
     grid = load_static_grid()
 
+    if hhl is not None and grid is not None:
+        # Inject coords into HHL so it can serve as a sample for process_traces
+        n_grid = grid['lat'].size
+        match_dim = next((d for d in hhl.dims if hhl.sizes[d] == n_grid), None)
+        if match_dim:
+            hhl = hhl.assign_coords({
+                "latitude": (match_dim, grid['lat'].values),
+                "longitude": (match_dim, grid['lon'].values)
+            })
+
     for ref_time in runs:
         tag = ref_time.strftime('%Y%m%d_%H%M')
         max_h = 45 if ref_time.hour == 3 else 33
@@ -226,10 +242,14 @@ def main():
             log(f"Run {tag} complete locally."); break
         
         log(f"Processing run: {tag}")
+        any_success = False
         for h in range(max_h + 1):
             iso_h = get_iso_horizon(h)
-            fields = {"HHL": hhl} if hhl is not None else {}
+            valid_time_str = (ref_time + datetime.timedelta(hours=h)).strftime('%Y-%m-%dT%H:%M:%SZ')
+            # Only log detailed info if we actually have chance of finding data
             
+            fields = {"HHL": hhl} if hhl is not None else {}
+            has_new_data = False
             for var in ["T", "U", "V", "P", "QV"]:
                 try:
                     req = ogd_api.Request(collection="ogd-forecasting-icon-ch1", variable=var,
@@ -246,14 +266,28 @@ def main():
                             fields[var] = data
                             ds.close()
                             os.remove(tmp)
-                except Exception as e: log(f"{var} H+{h} err: {e}", "ERROR")
+                            has_new_data = True
+                except: pass
             
-            if fields:
+            if has_new_data:
                 process_traces(fields, locations, tag, h, ref_time)
                 process_wind_maps(fields, tag, h, ref_time)
                 log(f"H+{h:02d} done")
-        break # Only process latest successful run
+                any_success = True
+        
+        if any_success:
+            log(f"Run {tag} processing complete.", "NOTICE")
+            break # Success, don't Fallback to older runs
+        else:
+            log(f"Run {tag} yield no data, trying next available run...")
+            # Cleanup the empty directory if it was created
+            for d in [CACHE_DIR_TRACES, CACHE_DIR_MAPS]:
+                p = os.path.join(d, tag)
+                if os.path.exists(p) and not os.listdir(p):
+                    try: shutil.rmtree(p)
+                    except: pass
 
+    log("--- Data Fetcher Complete ---", "NOTICE")
     cleanup_old_runs()
 
 def cleanup_old_runs():
@@ -271,4 +305,3 @@ def cleanup_old_runs():
 
 if __name__ == "__main__":
     main()
-
