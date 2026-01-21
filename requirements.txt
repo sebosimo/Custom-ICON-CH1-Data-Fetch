@@ -7,3 +7,4 @@ matplotlib
 netCDF4
 streamlit
 geocat-viz
+requests

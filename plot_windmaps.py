@@ -1,8 +1,12 @@
 import xarray as xr
 import matplotlib.pyplot as plt
-import cartopy.crs as ccrs
-import cartopy.feature as cfeature
-import geocat.viz as gv
+try:
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+    HAS_CARTOPY = True
+except ImportError:
+    HAS_CARTOPY = False
+# import geocat.viz as gv
 import os
 import numpy as np
 
@@ -52,15 +56,23 @@ def plot_timestep(nc_path, time_tag, h_str):
              lon = u.lon
 
         fig = plt.figure(figsize=(10, 8))
-        ax = plt.axes(projection=ccrs.PlateCarree())
+        fig = plt.figure(figsize=(10, 8))
         
-        # Add features
-        ax.add_feature(cfeature.BORDERS, linestyle=':')
-        ax.add_feature(cfeature.LAKES, alpha=0.5)
-        # ax.add_feature(cfeature.RIVERS) # Optional
-        
-        # Set extent (Switzerland approx)
-        ax.set_extent([5.5, 11.0, 45.5, 48.0], crs=ccrs.PlateCarree())
+        if HAS_CARTOPY:
+            ax = plt.axes(projection=ccrs.PlateCarree())
+            # Add features
+            ax.add_feature(cfeature.BORDERS, linestyle=':')
+            ax.add_feature(cfeature.LAKES, alpha=0.5)
+            # Set extent (Switzerland approx)
+            ax.set_extent([5.5, 11.0, 45.5, 48.0], crs=ccrs.PlateCarree())
+            transform_arg = {'transform': ccrs.PlateCarree()}
+        else:
+            ax = plt.axes()
+            # Simple aspect ratio fix
+            ax.set_aspect('equal')
+            ax.set_xlim(5.5, 11.0)
+            ax.set_ylim(45.5, 48.0)
+            transform_arg = {}
         
         # Plot Speed
         if is_unstructured:
@@ -70,9 +82,9 @@ def plot_timestep(nc_path, time_tag, h_str):
              # 1M scatter is large.
              # Re-gridding is better.
              # For now, try tricontourf with fewer levels or scatter map.
-             cf = ax.tricontourf(lon, lat, speed, levels=20, cmap='viridis', transform=ccrs.PlateCarree())
+             cf = ax.tricontourf(lon, lat, speed, levels=20, cmap='viridis', **transform_arg)
         else:
-             cf = ax.contourf(lon, lat, speed, levels=20, cmap='viridis', transform=ccrs.PlateCarree())
+             cf = ax.contourf(lon, lat, speed, levels=20, cmap='viridis', **transform_arg)
              
         plt.colorbar(cf, ax=ax, orientation='horizontal', label='Wind Speed (m/s)', pad=0.05, shrink=0.8)
         
@@ -88,12 +100,13 @@ def plot_timestep(nc_path, time_tag, h_str):
         stride = 500 # Adjust based on 1M points
         if is_unstructured:
              q = ax.quiver(lon[::stride], lat[::stride], u[::stride], v[::stride], 
-                          transform=ccrs.PlateCarree(), color='white', width=0.002, scale=200)
+                          color='white', width=0.002, scale=200, **transform_arg)
         
-        gv.set_titles_and_labels(ax, 
-            maintitle=f"Wind Map {level_name}", 
-            lefttitle=f"Valid: {time_tag} +{h_str}", 
-            righttitle="ICON-CH1")
+        # gv.set_titles_and_labels(ax, 
+        #     maintitle=f"Wind Map {level_name}", 
+        #     lefttitle=f"Valid: {time_tag} +{h_str}", 
+        #     righttitle="ICON-CH1")
+        plt.title(f"Wind Map {level_name} - {time_tag} +{h_str}", fontsize=14)
             
         # Save
         s_dir = os.path.join(ARTIFACT_DIR, time_tag)
