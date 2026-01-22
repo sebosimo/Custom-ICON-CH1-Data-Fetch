@@ -37,14 +37,7 @@ HGRID_FILENAME = "horizontal_constants_icon-ch1-eps.grib2"
 STAC_BASE_URL = "https://data.geo.admin.ch/api/stac/v1/collections/ch.meteoschweiz.ogd-forecasting-icon-ch1"
 STAC_ASSETS_URL = f"{STAC_BASE_URL}/assets"
 
-WIND_LEVELS = [
-    {"name": "10m_AGL",   "h": 10,   "type": "AGL"},
-    {"name": "800m_AGL",  "h": 800,  "type": "AGL"},
-    {"name": "1500m_AMSL","h": 1500, "type": "AMSL"},
-    {"name": "2000m_AMSL","h": 2000, "type": "AMSL"},
-    {"name": "3000m_AMSL","h": 3000, "type": "AMSL"},
-    {"name": "4000m_AMSL","h": 4000, "type": "AMSL"},
-]
+WIND_LEVELS = []
 
 os.makedirs(CACHE_DIR_TRACES, exist_ok=True)
 os.makedirs(CACHE_DIR_MAPS, exist_ok=True)
@@ -75,7 +68,7 @@ def download_file(url, target_path, max_retries=3):
             with requests.get(url, stream=True, timeout=30) as r:
                 r.raise_for_status()
                 with open(target_path, 'wb') as f:
-                    for chunk in r.iter_content(chunk_size=8192):
+                    for chunk in r.iter_content(chunk_size=1024*1024):
                         f.write(chunk)
             log(f"Download complete: {target_path}")
             return True
@@ -162,14 +155,18 @@ def process_traces(fields, locations, tag, h, ref):
     indices = {n: int(np.argmin((lats-c['lat'])**2+(lons-c['lon'])**2)) for n, c in locations.items()}
 
     for name, idx in indices.items():
-        loc_dir = os.path.join(CACHE_DIR_TRACES, tag, sanitize_name(name))
+        # New Naming: [Location]_[RunTag]_H[horizon].nc
+        safe_name = sanitize_name(name)
+        loc_dir = os.path.join(CACHE_DIR_TRACES, tag, safe_name)
         os.makedirs(loc_dir, exist_ok=True)
-        path = os.path.join(loc_dir, f"H{h:02d}.nc")
+        filename = f"{safe_name}_{tag}_H{h:02d}.nc"
+        path = os.path.join(loc_dir, filename)
+        
         if os.path.exists(path): continue
 
         loc_vars = {}
+        # Include HHL for accurate height info (Iterate ALL fields)
         for var, ds in fields.items():
-            if var == "HHL": continue
             s_dim = ds[lat_n].dims[0]
             profile = ds.squeeze().isel({s_dim: idx}).compute()
             if profile.dims: profile = profile.rename({profile.dims[0]: 'level'})
@@ -180,10 +177,14 @@ def process_traces(fields, locations, tag, h, ref):
         ds_out.to_netcdf(path)
 
 def process_wind_maps(fields, tag, h_int, ref):
-    output_path = os.path.join(CACHE_DIR_MAPS, tag, f"wind_maps_H{h_int:02d}.nc")
-    if os.path.exists(output_path) or "U" not in fields or "V" not in fields or "HHL" not in fields: return
-
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    if "U" not in fields or "V" not in fields or "HHL" not in fields:
+        missing = [k for k in ["U", "V", "HHL"] if k not in fields]
+        log(f"process_wind_maps aborting. Missing fields: {missing}", "ERROR")
+        return
+    
+    # Load WIND_LEVELS from JSON if not already loaded available globally or passed
+    # For now assuming global WIND_LEVELS is populated in main/config
+    
     from metpy.interpolate import interpolate_to_isosurface
     u, v, hhl = fields["U"].squeeze(), fields["V"].squeeze(), fields["HHL"].squeeze()
     
@@ -195,26 +196,49 @@ def process_wind_maps(fields, tag, h_int, ref):
         np_u, np_v = u.values, v.values
         np_z = z_f
         
-        out_ds = {}
         for lvl in WIND_LEVELS:
             try:
+                # New Naming: Wind_[Type]_[Level]_[RunTag]_H[horizon].nc
+                fname = f"Wind_{lvl['type']}_{lvl['name']}_{tag}_H{h_int:02d}.nc"
+                out_dir = os.path.join(CACHE_DIR_MAPS, tag)
+                os.makedirs(out_dir, exist_ok=True)
+                output_path = os.path.join(out_dir, fname)
+                
+                if os.path.exists(output_path): continue
+
                 target_z = np_z - h_surf.values if lvl['type'] == 'AGL' else np_z
                 res_u = interpolate_to_isosurface(target_z, np_u, lvl['h'])
                 res_v = interpolate_to_isosurface(target_z, np_v, lvl['h'])
                 
                 spatial = u.dims[-1]
                 coords = {spatial: u[spatial], "latitude": u.latitude, "longitude": u.longitude}
-                out_ds[f"u_{lvl['name']}"] = xr.DataArray(res_u, dims=[spatial], coords=coords)
-                out_ds[f"v_{lvl['name']}"] = xr.DataArray(res_v, dims=[spatial], coords=coords)
-            except: pass
-        
-        if out_ds:
-            xr.Dataset(out_ds).to_netcdf(output_path)
-            log(f"Saved wind map: {output_path}")
-    except Exception as e: log(f"Wind map error: {e}", "ERROR")
+                
+                out_ds = xr.Dataset({
+                    f"u_{lvl['name']}": xr.DataArray(res_u, dims=[spatial], coords=coords),
+                    f"v_{lvl['name']}": xr.DataArray(res_v, dims=[spatial], coords=coords)
+                })
+                out_ds.attrs = {"level_name": lvl['name'], "level_type": lvl['type'], "level_h": lvl['h'], "ref_time": ref.isoformat()}
+                out_ds.to_netcdf(output_path)
+                log(f"Saved wind map: {fname}")
+            except Exception as e: log(f"Error processing level {lvl['name']}: {e}", "ERROR")
+
+    except Exception as e: log(f"Wind map setup error: {e}", "ERROR")
 
 def main():
     log("Main start...")
+    
+    # Load WIND_LEVELS from JSON
+    global WIND_LEVELS
+    try:
+        if os.path.exists("wind_levels.json"):
+            with open("wind_levels.json", "r") as f:
+                WIND_LEVELS = json.load(f)
+            log(f"Loaded {len(WIND_LEVELS)} wind levels from config.")
+        else:
+            log("Warning: wind_levels.json not found! Wind maps will be skipped.", "WARNING")
+    except Exception as e:
+        log(f"Error loading wind_levels.json: {e}", "ERROR")
+
     download_static_files()
     if not os.path.exists("locations.json"): return
     with open("locations.json", "r", encoding="utf-8") as f: locations = json.load(f)
