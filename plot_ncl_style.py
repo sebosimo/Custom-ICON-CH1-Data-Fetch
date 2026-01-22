@@ -135,95 +135,139 @@ def plot_single_level(u_grid, v_grid, lon_grid, lat_grid, level_name, time_str, 
                      transform=ccrs.PlateCarree(), 
                      extend='max')
     
-    # Vectors: Streamlines with Variable Density
-    # Strategy: Seed points based on wind speed.
-    # Manually project grid and vectors to Mercator for Streamplot
-    # This avoids issues where start_points (in PlateCarree) are not correctly transformed by Cartopy
-    proj = ccrs.Mercator()
+    # --- Custom Trajectory Integration (Lagrangian) ---
+    # User Request: "Length proportional to speed", "Arrow at end", "1.5x density"
     
-    # Project grid points
+    # 0. Project Grid to Mercator (for meters)
+    proj = ccrs.Mercator()
     pts_proj = proj.transform_points(ccrs.PlateCarree(), lon_grid, lat_grid)
     
-    # Extract 1D axes for streamplot (rectilinear grid)
-    # Mercator projection of a Lat/Lon regular grid results in a rectilinear grid (separable x and y)
-    x_grid_1d = pts_proj[0, :, 0] # Shape (N_lon,)
-    y_grid_1d = pts_proj[:, 0, 1] # Shape (N_lat,)
-    
-    # Full 2D grid for seed selection
-    x_grid_2d = pts_proj[:,:,0]
-    y_grid_2d = pts_proj[:,:,1]
+    # Extract 1D axes (rectilinear grid)
+    x_grid_1d = pts_proj[0, :, 0] # Lon varies along axis 1 (columns) -> Row 0, All Cols
+    y_grid_1d = pts_proj[:, 0, 1] # Lat varies along axis 0 (rows) -> All Rows, Col 0
     
     # Project vectors
     u_proj, v_proj = proj.transform_vectors(ccrs.PlateCarree(), lon_grid, lat_grid, u_grid, v_grid)
     
-    # Calculate speed from projected vectors for linewidth (should be similar magnitude)
-    speed_proj = np.sqrt(u_proj**2 + v_proj**2) * 3.6 # km/h
+    # 1. Prepare Interpolator (RegularGridInterpolator expects (y, x) order)
+    # x_grid_1d, y_grid_1d come from Mercator projection of 1D lat/lon.
+    # Note: RegularGridInterpolator requires grid points to be strictly increasing.
+    # We checked this in debug loops previously.
     
-    # Seed generation based on speed
-    s_norm = speed_proj / 80.0
-    s_norm = np.clip(s_norm, 0, 1)
-    base_prob = 0.08
-    seed_mask = np.random.rand(*speed_proj.shape) < (s_norm * base_prob + 0.005)
-
-    # Filter seeds to be strictly inside the projected domain
-    # NaN Check
-    if np.isnan(x_grid_1d).any() or np.isnan(y_grid_1d).any():
-        print("WARNING: NaNs detected in projected grid!")
+    from scipy.interpolate import RegularGridInterpolator
+    from matplotlib.collections import LineCollection
+    import matplotlib.markers as mmarkers
     
-    # Use nanmin/nanmax
-    eps = 2000.0 
-    x_min, x_max = np.nanmin(x_grid_1d) + eps, np.nanmax(x_grid_1d) - eps
-    y_min, y_max = np.nanmin(y_grid_1d) + eps, np.nanmax(y_grid_1d) - eps
+    # Interpolators for u_proj, v_proj
+    # grid is (lat(y), lon(x)) usually, but here projected y, x.
+    # Check shape: u_grid is (lat, lon) -> (y, x).
+    interp_u = RegularGridInterpolator((y_grid_1d, x_grid_1d), u_proj, bounds_error=False, fill_value=0)
+    interp_v = RegularGridInterpolator((y_grid_1d, x_grid_1d), v_proj, bounds_error=False, fill_value=0)
     
-    # TEST: Use only ONE seed at the center to verify connectivity
-    # xc = x_grid_1d[len(x_grid_1d)//2]
-    # yc = y_grid_1d[len(y_grid_1d)//2]
-    # start_points = np.array([[xc, yc]])
+    # 2. Generate Seeds
+    # Increase density: Stride of 3 or 4 pixels?
+    # Grid is 136x275. 
+    # Stride 4 -> ~34x68 = 2300 seeds.
+    # Stride 3 -> ~45x90 = 4000 seeds.
+    # Let's try Stride 4 first, then adjust. User wants 1.5x "lines".
+    # Previous streamplot density=30 is opaque.
+    stride = 3 
     
-    # Full logic with robust filter
-    pts_x = x_grid_2d[seed_mask]
-    pts_y = y_grid_2d[seed_mask]
+    # Use meshgrid for seeds
+    # Jitter seeds slightly to avoid regular grid artifacts
+    seed_x_1d = x_grid_1d[::stride]
+    seed_y_1d = y_grid_1d[::stride]
+    seed_x, seed_y = np.meshgrid(seed_x_1d, seed_y_1d)
+    seed_pts = np.column_stack((seed_x.ravel(), seed_y.ravel()))
     
-    valid_seeds = (pts_x > x_min) & (pts_x < x_max) & \
-                  (pts_y > y_min) & (pts_y < y_max)
-                  
-    start_points = np.column_stack((pts_x[valid_seeds], pts_y[valid_seeds]))
+    # Add random jitter (half stride)
+    dx = (x_grid_1d[1] - x_grid_1d[0])
+    dy = (y_grid_1d[1] - y_grid_1d[0])
+    jitter = np.random.uniform(-0.5, 0.5, seed_pts.shape) * [dx*stride, dy*stride]
+    seed_pts += jitter
     
-    # Debug info
-    print(f"DEBUG: Grid X: {np.nanmin(x_grid_1d):.1f} - {np.nanmax(x_grid_1d):.1f} (Sorted? {np.all(np.diff(x_grid_1d) > 0)})")
-    print(f"DEBUG: Grid Y: {np.nanmin(y_grid_1d):.1f} - {np.nanmax(y_grid_1d):.1f} (Sorted? {np.all(np.diff(y_grid_1d) > 0)})")
-
-    # Convert to list of tuples to avoid potential numpy array issues
-    start_points_list = [tuple(p) for p in start_points]
+    # 3. Integrate Trajectories
+    # Fixed Integration Time T.
+    # Length L approx |V| * T.
+    # 10 m/s * 3600s = 36km. Map width ~300km. 36km is ~10% width. Good.
+    dt = 3600.0 # Total integration time (seconds)
+    n_steps = 5 # Number of segments per line for curvature
+    h = dt / n_steps # Time step per segment
     
-    # Linewidth
-    lw = 0.4 + 1.2 * (speed_proj / 100.0)
+    # Vectorized Integration (Euler or RK2)
+    # Current positions
+    xy = seed_pts.copy() # (N, 2)
+    
+    # Store segments: (N_seeds, n_steps+1, 2)
+    trajs = np.zeros((len(xy), n_steps + 1, 2))
+    trajs[:, 0, :] = xy
+    
+    for i in range(n_steps):
+        # Current coords (y, x) for interpolator
+        # Interpolator wants (y, x)
+        pts_for_interp = xy[:, ::-1] # Swap to (y, x)
+        
+        u_local = interp_u(pts_for_interp)
+        v_local = interp_v(pts_for_interp)
+        
+        # Simple Euler: new = old + v * h
+        xy[:, 0] += u_local * h
+        xy[:, 1] += v_local * h
+        
+        trajs[:, i+1, :] = xy
+        
+    # 4. Plotting
+    # Filter out static points (speed ~ 0) to reduce clutter?
+    # Compute total displacement
+    disp = np.linalg.norm(trajs[:, -1, :] - trajs[:, 0, :], axis=1)
+    min_disp = 1000.0 # 1km minimum length
+    valid_mask = disp > min_disp
+    
+    trajs = trajs[valid_mask]
+    
+    # Create LineCollection
+    # variable linewidth based on speed at NEW seed location (approx)
+    # Re-evaluate speed at start
+    pts_start = trajs[:, 0, ::-1] # y,x
+    u_start = interp_u(pts_start)
+    v_start = interp_v(pts_start)
+    speed_start = np.sqrt(u_start**2 + v_start**2) * 3.6 # km/h
+    
+    lw = 0.4 + 1.2 * (speed_start / 100.0)
     lw = np.clip(lw, 0.4, 1.5)
     
-    try:
-        # Plot streamplot in Mercator coordinates
-        # remove transform=proj to treat inputs as native data coordinates
-        ax.streamplot(x_grid_1d, y_grid_1d, u_proj, v_proj, 
-                  transform=None, 
-                  color='black', 
-                  linewidth=lw, 
-                  arrowsize=0.7,
-                  arrowstyle='->',
-                  density=30, 
-                  start_points=start_points_list,
-                  maxlength=20.0)
-    except Exception as e:
-        print(f"Streamplot Failed: {e}")
-        # Fallback with higher uniform density
-        print("Using fallback streamplot with uniform density=4")
-        ax.streamplot(x_grid_1d, y_grid_1d, u_proj, v_proj, 
-                  transform=None,
-                  color='black', 
-                  linewidth=lw,
-                  density=4)
- # Limit integration length if possible (in data coords?) check compat
-              # maxlength not always supported in older MPL. If error, remove.
-              # But user asked for "length", streamplot integration stops.
+    # Create segments for LineCollection: List of (N_points, 2)
+    segments = [trajs[i] for i in range(len(trajs))]
+    
+    lc = LineCollection(segments, colors='black', linewidths=lw, transform=proj, capstyle='round')
+    ax.add_collection(lc)
+    
+    # 5. Add Arrows at END of trajectories
+    # Only for sufficiently long lines?
+    end_pts = trajs[:, -1, :]
+    prev_pts = trajs[:, -2, :] # Use second to last to determine direction
+    
+    arrow_dirs = end_pts - prev_pts
+    # Normalize for orientation? Quiver handles vectors.
+    
+    # Arrow size scaling? Fixed size usually better for aesthetics.
+    # Quiver at end points.
+    # U, V for quiver is delta_x, delta_y
+    
+    # Subsample arrows if too dense?
+    # Or just plot all.
+    
+    ax.quiver(end_pts[:, 0], end_pts[:, 1], arrow_dirs[:, 0], arrow_dirs[:, 1],
+              transform=proj,
+              color='black',
+              scale=None, # Auto scale?
+              angles='xy', scale_units='xy', # Use vectors as displacement
+              width=0.0015,
+              headwidth=4,
+              headlength=5,
+              headaxislength=4.5,
+              pivot='tip') # Draw at TIP (End of line)
+
     
     # Colorbar
     cbar = plt.colorbar(cf, ax=ax, orientation='vertical', pad=0.02, shrink=0.9, aspect=25, drawedges=True)
@@ -261,7 +305,7 @@ def plot_single_level(u_grid, v_grid, lon_grid, lat_grid, level_name, time_str, 
 
     gv.set_titles_and_labels(ax,
                             maintitle="",
-                            lefttitle=f"{title_left}\nWind on {level_name}",
+                            lefttitle=f"{title_left}\nWind on {level_name.replace('_', ' ')}",
                             lefttitlefontsize=12,
                             righttitle=title_right,
                             righttitlefontsize=12, 
