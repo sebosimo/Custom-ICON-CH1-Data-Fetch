@@ -46,9 +46,10 @@ from datetime import datetime, timedelta
 import re
 
 # Configuration
+# Configuration
 CACHE_DIR = "cache_wind"
 OUTPUT_DIR = "map_artifacts/ncl_style"
-GRID_RES = 0.02 # Resolution for regridding in degrees
+# GRID_RES will be dynamic based on level
 
 def get_wind_data(nc_path):
     """Loads wind data and returns unstructured arrays."""
@@ -73,19 +74,28 @@ def get_wind_data(nc_path):
         print(f"Error loading {nc_path}: {e}")
         return [], None
 
-def regrid_data(u, v, lat_in, lon_in):
+def regrid_data(u, v, lat_in, lon_in, level_name):
     """Regrids unstructured data to a regular grid."""
+    
+    # Conditional Resolution based on level
+    # 10m AGL: High Res (1km)
+    # Others: Standard Res (2km)
+    if "10m_AGL" in level_name:
+        grid_res = 0.01 # 1km
+        stride = 1 # No downsampling
+        print(f"  Level {level_name}: Using HIGH RES mode (1km, full data)", flush=True)
+    else:
+        grid_res = 0.02 # 2km
+        stride = 5 # Downsample input
+        print(f"  Level {level_name}: Using FAST mode (2km, stride 5)", flush=True)
     
     # Define target grid based on domain of interest (Switzerland+)
     # Bounds: 5.5E - 11.0E, 45.5N - 48.2N
-    grid_lon_1d = np.arange(5.5, 11.0, GRID_RES)
-    grid_lat_1d = np.arange(45.5, 48.2, GRID_RES)
+    grid_lon_1d = np.arange(5.5, 11.0, grid_res)
+    grid_lat_1d = np.arange(45.5, 48.2, grid_res)
     grid_lon, grid_lat = np.meshgrid(grid_lon_1d, grid_lat_1d)
     
     # Flatten input coords
-    # OPTIMIZATION: Stride the input data to speed up regridding
-    stride = 5
-    
     lon_in_s = lon_in[::stride]
     lat_in_s = lat_in[::stride]
     points = np.column_stack((lon_in_s, lat_in_s))
@@ -165,13 +175,18 @@ def plot_single_level(u_grid, v_grid, lon_grid, lat_grid, level_name, time_str, 
     interp_v = RegularGridInterpolator((y_grid_1d, x_grid_1d), v_proj, bounds_error=False, fill_value=0)
     
     # 2. Generate Seeds
-    # Increase density: Stride of 3 or 4 pixels?
-    # Grid is 136x275. 
-    # Stride 4 -> ~34x68 = 2300 seeds.
-    # Stride 3 -> ~45x90 = 4000 seeds.
-    # Let's try Stride 4 first, then adjust. User wants 1.5x "lines".
-    # Previous streamplot density=30 is opaque.
-    stride = 3 
+    # Conditional Stride based on level
+    if "10m_AGL" in level_name:
+        stride = 3 # High density on high res grid (0.01 grid / 3 = 0.03 spacing)
+        # This matches user request for "stride 3 and high resolution pattern"
+    else:
+        stride = 3 # Standard density on standard grid (0.02 grid / 3 = 0.06 spacing)
+        # Wait, user wants "standard" for others. Standard was stride 3 on 0.02.
+        # So stride=3 is correct for both if we want 10m to be denser/sharper?
+        # User said: "keep the stride 3 and the high resolution pattern" for 10m.
+        # And "revert to old settings" for others (stride 3 on 0.02 grid).
+        # So stride is constant 3, but the grid size changes underneath.
+        pass
     
     # Use meshgrid for seeds
     # Jitter seeds slightly to avoid regular grid artifacts
@@ -357,7 +372,7 @@ def process_timestep(nc_path):
         v = item['v']
         
         # Regrid
-        grid_lon, grid_lat, u_grid, v_grid = regrid_data(u, v, lat, lon)
+        grid_lon, grid_lat, u_grid, v_grid = regrid_data(u, v, lat, lon, level_name)
         
         # Plot
         h_str = filename.split("_")[-1].replace(".nc", "")
