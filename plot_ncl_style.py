@@ -44,6 +44,9 @@ import os
 import glob
 from datetime import datetime, timedelta
 import re
+import cartopy.io.shapereader as shpreader
+import shapely.geometry as sgeom
+import cartopy
 
 # Configuration
 # Configuration
@@ -130,20 +133,98 @@ def plot_single_level(u_grid, v_grid, lon_grid, lat_grid, level_name, time_str, 
     ax.set_extent([5.5, 11.0, 45.5, 48.0], crs=ccrs.PlateCarree())
     
     # Add Map Features
-    ax.add_feature(cfeature.BORDERS, linestyle='-', linewidth=0.5, edgecolor='black')
-    ax.add_feature(cfeature.LAKES, edgecolor='black', facecolor='none', linewidth=0.5)
+    # User Request: "Include rivers and lakes" similar to MeteoSwiss
+    # Scale: 10m for high res
+    rivers = cfeature.NaturalEarthFeature(category='physical', name='rivers_lake_centerlines',
+                                        scale='10m', facecolor='none', edgecolor='black', linewidth=0.4, alpha=0.5)
+    
+    # Dynamic Path Construction (No hardcoding)
+    data_dir = cartopy.config.get('data_dir', os.path.expanduser('~/.local/share/cartopy'))
+    
+    # Construct path: shapefiles/gshhs/h/GSHHS_h_L2.shp
+    gshhs_path = os.path.join(data_dir, 'shapefiles', 'gshhs', 'h', 'GSHHS_h_L2.shp')
+    
+    try:
+        print(f"  Loading raw GSHHS from: {gshhs_path}", flush=True)
+        # Verify file exists before loading
+        if os.path.exists(gshhs_path):
+            reader = shpreader.Reader(gshhs_path)
+            
+            # Filter for Swiss domain (approx 5.5-11E, 45.5-48.2N)
+            swiss_box = sgeom.box(5.0, 45.0, 11.5, 49.0)
+            
+            lakes_to_draw = []
+            for geom in reader.geometries():
+                if swiss_box.intersects(geom):
+                    lakes_to_draw.append(geom)
+            
+            if lakes_to_draw:
+                print(f"  Found {len(lakes_to_draw)} lakes in domain. Adding...", flush=True)
+                ax.add_geometries(lakes_to_draw, ccrs.PlateCarree(),
+                                  facecolor='none', edgecolor='black', linewidth=0.6, alpha=0.7, zorder=12)
+            else:
+                print("  WARNING: No lakes found intersecting Swiss domain in GSHHS L2.", flush=True)
+        else:
+             print(f"  GSHHS shapefile not found at {gshhs_path}. Falling back to cfeature.", flush=True)
+             raise FileNotFoundError("GSHHS file missing")
+             
+    except Exception as e:
+        print(f"  Manual GSHHS load failed: {e}", flush=True)
+        # Fallback to standard
+        gshhs = cfeature.GSHHSFeature(scale='high', levels=None, facecolor='none', edgecolor='black', linewidth=0.5, alpha=0.5)
+        ax.add_feature(gshhs, zorder=10)
+
+    # Rivers: User asked for "corresponding rivers" -> WDBII is the companion to GSHHS.
+    # WDBII Rivers: Manual loading because cfeature.WDBII is missing in some versions
+    wdbii_dir = os.path.join(data_dir, 'shapefiles', 'wdbii', 'river', 'h')
+    
+    try:
+        rivers_to_draw = []
+        # Levels 1-11 for maximum detail
+        for i in range(1, 12):
+            shp_path = os.path.join(wdbii_dir, f"WDBII_river_h_L{i:02d}.shp")
+            if os.path.exists(shp_path):
+                # print(f"  Loading WDBII Rivers Level {i}...", flush=True)
+                reader = shpreader.Reader(shp_path)
+                
+                # Metadata check for domain intersection is faster? 
+                # For simplicity, we use the same swiss_box as lakes
+                swiss_box = sgeom.box(5.0, 45.0, 11.5, 49.0)
+                
+                for geom in reader.geometries():
+                    if swiss_box.intersects(geom):
+                        rivers_to_draw.append(geom)
+        
+        if rivers_to_draw:
+             print(f"  Found {len(rivers_to_draw)} WDBII river segments in domain. Adding...", flush=True)
+             ax.add_geometries(rivers_to_draw, ccrs.PlateCarree(),
+                               facecolor='none', edgecolor='black', linewidth=0.3, alpha=0.7, zorder=11)
+        else:
+             print("  WARNING: No WDBII rivers found in domain.", flush=True)
+             raise Exception("Manual WDBII load found nothing")
+             
+    except Exception as e:
+        print(f"  Manual WDBII Rivers failed: {e}. Falling back to Natural Earth.")
+        # Fallback to Natural Earth (Verified working)
+        ne_rivers = cfeature.NaturalEarthFeature(category='physical', name='rivers_lake_centerlines',
+                                            scale='10m', facecolor='none', edgecolor='black', linewidth=0.4, alpha=0.7)
+        ax.add_feature(ne_rivers, zorder=10)
+
+    ax.add_feature(cfeature.BORDERS, linestyle='-', linewidth=0.5, edgecolor='black', zorder=10)
 
     # Colormap
     cmap = NCL_CMAP
     norm = mcolors.BoundaryNorm(bounds, cmap.N, extend='max')
 
     # Contourf (Speed)
+    # User Request: "Slightly less opacity" to see map behind
     cf = ax.contourf(lon_grid, lat_grid, speed_kmh, 
                      levels=bounds, 
                      norm=norm,
                      cmap=cmap, 
                      transform=ccrs.PlateCarree(), 
-                     extend='max')
+                     extend='max',
+                     alpha=0.7) # Transparency
     
     # --- Custom Trajectory Integration (Lagrangian) ---
     # User Request: "Length proportional to speed", "Arrow at end", "1.5x density"
@@ -181,11 +262,6 @@ def plot_single_level(u_grid, v_grid, lon_grid, lat_grid, level_name, time_str, 
         # This matches user request for "stride 3 and high resolution pattern"
     else:
         stride = 3 # Standard density on standard grid (0.02 grid / 3 = 0.06 spacing)
-        # Wait, user wants "standard" for others. Standard was stride 3 on 0.02.
-        # So stride=3 is correct for both if we want 10m to be denser/sharper?
-        # User said: "keep the stride 3 and the high resolution pattern" for 10m.
-        # And "revert to old settings" for others (stride 3 on 0.02 grid).
-        # So stride is constant 3, but the grid size changes underneath.
         pass
     
     # Use meshgrid for seeds
@@ -248,8 +324,11 @@ def plot_single_level(u_grid, v_grid, lon_grid, lat_grid, level_name, time_str, 
     v_start = interp_v(pts_start)
     speed_start = np.sqrt(u_start**2 + v_start**2) * 3.6 # km/h
     
-    lw = 0.4 + 1.2 * (speed_start / 100.0)
-    lw = np.clip(lw, 0.4, 1.5)
+    # User Request: "Wind lines little bit thinner"
+    # Old: 0.4 + 1.2 * (speed / 100) -> Range 0.4 to 1.6
+    # New: 0.3 + 0.9 * (speed / 100) -> Range 0.3 to 1.2
+    lw = 0.3 + 0.9 * (speed_start / 100.0)
+    lw = np.clip(lw, 0.3, 1.2)
     
     # Create segments for LineCollection: List of (N_points, 2)
     segments = [trajs[i] for i in range(len(trajs))]
