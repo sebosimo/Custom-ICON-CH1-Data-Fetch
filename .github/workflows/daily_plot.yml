@@ -1,0 +1,87 @@
+name: Sounding Workflow
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_refresh:
+        description: 'Download fresh data?'
+        type: boolean
+        default: false
+  schedule:
+    # Shifted minutes to avoid high-traffic marks
+    - cron: '12,42 * * * *'
+
+# --- FIX 1: Prevent multiple jobs from running at the same time ---
+concurrency:
+  group: weather-data-update
+  cancel-in-progress: false # Let the current one finish, queue the next
+
+jobs:
+  update-weather-data:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+          # --- NEW STEP: FREE UP DISK SPACE ---
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1 # Shallow clone to save disk space (avoid downloading huge .git history)
+      
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libeccodes-dev
+
+      - name: Install Python Dependencies
+        run: |
+          uv venv
+          uv pip install -r requirements.txt
+
+      - name: Fetch Weather Data
+        env:
+          FORCE_REFRESH: ${{ github.event.inputs.force_refresh }}
+          RETENTION_DAYS: "2" # Explicitly clean up data older than 2 days in CI
+        run: uv run python fetch_data.py
+
+      - name: Commit and Push Data
+        run: |
+          git config --global user.name "GitHub Action"
+          git config --global user.email "actions@github.com"
+          
+          # 1. Ensure directories exist (fetch_data.py should create them, but for safety)
+          mkdir -p cache_data
+          mkdir -p cache_wind
+          
+          # 2. Cleanup (Now handled by fetch_data.py based on RETENTION_DAYS)
+          # We no longer use 'find -mtime' because git checkout resets file timestamps.
+          
+          # 3. Stage changes (Include BOTH folders, FORCE add because they are ignored)
+          git add -f cache_data/
+          git add -f cache_wind/
+          
+          # 4. Commit and Push with Race Condition Protection
+          if [ -n "$(git status --porcelain)" ]; then
+            git commit -m "Auto-update weather data: $(date -u +'%Y-%m-%d %H:%M') UTC"
+            # CRITICAL: Pull latest changes before pushing to avoid conflicts
+            git pull --rebase origin main
+            git push
+          else
+            echo "No new data to commit"
+          fi
