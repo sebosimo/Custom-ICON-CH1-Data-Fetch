@@ -331,7 +331,7 @@ def main():
             
             if has_new_data:
                 process_traces(fields, locations, tag, h, ref_time)
-                process_wind_maps(fields, tag, h, ref_time)
+                # process_wind_maps(fields, tag, h, ref_time)
                 log(f"H+{h:02d} done")
                 any_success = True
         
